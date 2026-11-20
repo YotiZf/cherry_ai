@@ -1,0 +1,16 @@
+# Optional extras used by specialist plugins or generated scripts.
+# Install only the packages for the features you enable.
+ddgs
+tavily-python
+pytesseract
+curl_cffi
+playwright
+selenium
+webdriver-manager
+pandas
+openpyxl
+matplotlib
+av
+
+# Audio diarization is large and may require separate model access/configuration.
+# Install torch and pyannote.audio only if you use speaker diarization.

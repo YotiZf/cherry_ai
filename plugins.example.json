@@ -1,0 +1,29 @@
+{
+  "enabled": [
+    "cerry_docs",
+    "cerry_ingest",
+    "cerry_routing",
+    "cerry_models",
+    "cerry_tuning",
+    "cerry_style",
+    "cerry_files",
+    "cerry_chat",
+    "vision",
+    "cerry_contextmenu",
+    "cerry_images",
+    "cerry_export",
+    "cerry_audio",
+    "cerry_deadline",
+    "cerry_jobs_1",
+    "cerry_memory",
+    "cerry_restart",
+    "cerry_jobs_latex",
+    "cerry_tokens",
+    "cerry_unlink",
+    "cerry_style_depth",
+    "cerry_textsize",
+    "cerry_layout",
+    "cerry_chat_memory",
+    "cerry_web_reader"
+  ]
+}

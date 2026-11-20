@@ -1,0 +1,17 @@
+{
+  "stt_engine": "groq",
+  "stt_language": "auto",
+  "groq_model": "whisper-large-v3-turbo",
+  "whisper_model": "small",
+  "stt_hint": "Cherry,",
+  "en_voice": "en_US-lessac-medium",
+  "de_voice": "de_DE-thorsten-medium",
+  "speed": 1.0,
+  "auto_read": false,
+  "default_lang": "en",
+  "silence_ms": 900,
+  "vad_sensitivity": 1.0,
+  "idle_timeout_s": 90,
+  "max_utterance_s": 30,
+  "interrupt": false
+}

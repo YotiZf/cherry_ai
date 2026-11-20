@@ -1,0 +1,23 @@
+# Core app, chat providers, document handling, and common plugins
+python-dotenv
+httpx
+openai
+beautifulsoup4
+Pillow
+python-docx
+pypdf
+pdfplumber
+reportlab
+
+# Voice recording, local transcription, and local Piper speech output
+numpy
+sounddevice
+faster-whisper
+piper-tts
+lingua-language-detector
+
+# Job search and document/image ingestion
+python-jobspy
+pypdfium2
+PyMuPDF
+rapidocr-onnxruntime
