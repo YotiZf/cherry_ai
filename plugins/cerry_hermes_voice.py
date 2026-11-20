@@ -1,6 +1,6 @@
 """Cerry Hermes voice (v3): voice and typed Hermes tasks start by themselves AND appear in a task list where you can end them.
 
-Self-contained: needs only cerry_hermes_core.py (the engine that talks to the Hermes gateway), not the Hermes plugin.
+Self-contained: uses core/cerry_hermes_core.py (the engine that talks to the Hermes gateway), not the Hermes plugin.
 Tasks start immediately with your default models (the model selected in the main window first, then the other cloud
 models, local models last). Several tasks can run at the same time (default 3, "max_parallel").
 

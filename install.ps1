@@ -33,12 +33,12 @@ $templates = @(
 foreach ($template in $templates) {
     $target = Join-Path $dataDir $template.Destination
     if (-not (Test-Path -LiteralPath $target)) {
-        Copy-Item -LiteralPath (Join-Path $projectRoot $template.Source) -Destination $target
+        Copy-Item -LiteralPath (Join-Path (Join-Path $projectRoot 'config') $template.Source) -Destination $target
     }
 }
 $keyFile = Join-Path $projectRoot 'key.env'
 if (-not (Test-Path -LiteralPath $keyFile)) {
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'key.env.example') -Destination $keyFile
+    Copy-Item -LiteralPath (Join-Path (Join-Path $projectRoot 'config') 'key.env.example') -Destination $keyFile
 }
 
 Push-Location -LiteralPath $voiceDir

@@ -17,7 +17,7 @@ What it does
  - A task saved with models that no longer exist falls back to the default chain (the model selected in the main window
    first, then the others, local models last). The confirmation window shows the models before anything runs.
 Enable by adding "cerry_hermes_models" to ai_workspace_data/plugins.json (anywhere after "cerry_hermes").
-Needs cerry_hermes_core.py, which you already have.
+Uses the shared core/cerry_hermes_core.py module.
 """
 import importlib
 import time

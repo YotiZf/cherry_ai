@@ -1,16 +1,16 @@
-"""Patch voice.py: load the speech package (piper) only when Cerry first speaks.
+"""Patch core/voice.py: load the speech package (piper) only when Cerry first speaks.
 
-Run once, in the Cerry folder:   python patch_voice.py
-It makes a backup (voice.py.bak), checks that voice.py is the expected version, and changes two places.
-Running it again does nothing. To undo: copy voice.py.bak over voice.py.
+Run once, from any folder:   python tools/patch_voice.py
+It makes core/voice.py.bak, checks that core/voice.py is the expected version, and changes two places.
+Running it again does nothing. To undo: copy core/voice.py.bak over core/voice.py.
 """
 import shutil
 import sys
 from pathlib import Path
 
-path = Path("voice.py")
+path = Path(__file__).resolve().parent.parent / "core" / "voice.py"
 if not path.exists():
-    sys.exit("voice.py not found - run this in the Cerry folder.")
+    sys.exit("core/voice.py not found - run this from the Cherry project.")
 text = path.read_bytes().decode("utf-8")
 crlf = "\r\n" in text
 text = text.replace("\r\n", "\n")
@@ -27,7 +27,8 @@ if NEW_IMPORT in text:
     sys.exit("voice.py is already patched - nothing to do.")
 if OLD_IMPORT not in text or OLD_SYNTH not in text:
     sys.exit("voice.py is not the expected version - nothing was changed.")
-shutil.copy2(path, "voice.py.bak")
+backup = path.with_suffix(path.suffix + ".bak")
+shutil.copy2(path, backup)
 text = text.replace(OLD_IMPORT, NEW_IMPORT, 1).replace(OLD_SYNTH, NEW_SYNTH, 1)
 path.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
-print("voice.py patched. Backup: voice.py.bak")
+print("voice.py patched. Backup: " + str(backup))

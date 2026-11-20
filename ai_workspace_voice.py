@@ -2,10 +2,9 @@
 
 Layout of the program
   ai_workspace_voice.py   this file: the window (App), models/providers, prompts, chat flow
-  workspace.py            workspaces: documents, chats, notes (no GUI)
-  routing.py / streaming.py / evidence.py / doc_manager.py / voice.py   core modules
-  cerri_extensions.py     plugin loader: starts every plugin named in ai_workspace_data/plugins.json
+  core/                   reusable engines, workspace logic, and the plugin loader
   plugins/cerry_*.py      plugins (models, audio, vision, images, export, agents, jobs, ...)
+  config/                 safe example settings copied into ai_workspace_data/ on first setup
 Keys live in key.env next to this file.  Everything the program saves is in ai_workspace_data/.
 """
 import copy, os, re, sys, json, uuid, shutil, subprocess, threading, queue, datetime
@@ -21,6 +20,9 @@ except NameError:
     APP_DIR = Path.cwd()
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+CORE_DIR = APP_DIR / "core"
+if str(CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(CORE_DIR))
 
 import routing, streaming, evidence, voice
 import cerri_extensions

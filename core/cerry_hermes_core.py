@@ -94,7 +94,7 @@ def reference_models(models, cfg):
         return list(models), "Cerry main model list"
     path = Path(filename).expanduser()
     if not path.is_absolute():
-        path = Path(cfg.get("_config_dir", Path(__file__).resolve().parent / "ai_workspace_data")) / path
+        path = Path(cfg.get("_config_dir", Path(__file__).resolve().parent.parent / "ai_workspace_data")) / path
     if not path.exists():
         return list(models), "Cerry main model list (reference file missing: %s)" % path
     try:
@@ -144,7 +144,7 @@ def build_routes(models, cfg):
                "local fallback" if r["local"] else "cloud") for r in routes]
     report += ["SKIPPED: " + item for item in skipped]
     try:
-        folder = Path(cfg.get("_config_dir", Path(__file__).resolve().parent / "ai_workspace_data"))
+        folder = Path(cfg.get("_config_dir", Path(__file__).resolve().parent.parent / "ai_workspace_data"))
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "hermes_models.log").write_text("\n".join(report) + "\n", encoding="utf-8")
     except OSError:

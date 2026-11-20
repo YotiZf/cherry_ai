@@ -1,6 +1,6 @@
 """Cerry + Hermes Agent: tasks ("missions") carried out by Hermes, with Cerry's models and a safe fallback chain.
 
-Switch on:  add "cerry_hermes" to ai_workspace_data/plugins.json   (needs cerry_hermes_core.py next to this file)
+Switch on:  add "cerry_hermes" to ai_workspace_data/plugins.json   (uses the shared core/cerry_hermes_core.py module)
 Use:        "Agent..." button above the input box, or type  /cherry <what Cherry should do>
 Settings:   ai_workspace_data/hermes.json   (created on first start)
 Tasks:      ai_workspace_data/hermes/tasks.json     Results: ai_workspace_data/hermes/runs/

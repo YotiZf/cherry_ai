@@ -26,7 +26,7 @@ PATHS = ["/v1", "/api/v1", "/api/v1/openai"]
 
 def load_env():
     for name in ("key.env", ".env"):
-        p = Path(name)
+        p = Path(__file__).resolve().parent.parent / name
         if p.is_file():
             for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
                 if "=" in line and not line.strip().startswith("#"):

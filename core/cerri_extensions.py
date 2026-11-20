@@ -4,8 +4,7 @@ Reads  ai_workspace_data/plugins.json   {"enabled": ["cerry_chat", "cerry_audio"
 and calls install(ns) of every plugin module in that list.
 
 * A name is looked up as a module: the alias table first (vision -> cerry_vision, ...), then the name itself, then
-  cerry_<name> and cerri_<name>.  Modules are searched next to ai_workspace_voice.py and in a "plugins" folder
-  next to it (create the folder and move the cerry_*.py files there if you like a tidy main folder).
+  cerry_<name> and cerri_<name>. Plugin modules are loaded from the "plugins" folder next to the app.
 * A plugin may define  ORDER = <number>  (default 50).  Smaller numbers are installed first, equal numbers keep
   the order of the list.  Wrapping order matters: cerry_docs 5, cerry_core 10, cerry_routing 20, cerry_chat 90.
 * One broken or missing plugin never stops Cerry or the other plugins.  Everything, including how many
