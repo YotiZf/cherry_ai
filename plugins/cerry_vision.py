@@ -4,7 +4,6 @@ Loaded automatically by cerri_extensions.install(). Needs: pip install pillow
 Settings live in  ai_workspace_data/vision.json  (created on first start).
 """
 import base64
-import copy
 import json
 import re
 import threading
@@ -24,7 +23,7 @@ VISION_HINTS = ("gemini", "-vl", "vl-", "vision", "llava", "pixtral", "llama-4",
 SCREEN_RE = re.compile(r"\b(my screen|the screen|this screen|on screen|screenshot|bildschirm)\b", re.I)
 DEFAULT_CONFIG = {
     "vision_ids": [],          # extra model ids that can read images, e.g. ["qwen-vl"]
-    "extra_models": [],        # e.g. [{"label": "Local Qwen3-VL 4B", "provider": "anythingllm", "id": "qwen-vl"}]
+    "extra_models": [],        # e.g. [{"label": "Local Qwen3-VL 4B", "provider": "ollama", "id": "qwen-vl"}]
     "history_images": 1,       # how many earlier image messages are re-sent for follow-up questions
     "voice_screen": True,      # saying "look at my screen" in conversation mode captures the screen
 }
@@ -110,12 +109,11 @@ def install(ns):
     App._cv_installed = True
     streaming, routing = ns["streaming"], ns["routing"]
     cfg = load_config(ns["DATA_DIR"] / "vision.json")
-    holder = {}
 
     models = ns["MODELS"]
     for extra in cfg.get("extra_models", []):
         if isinstance(extra, dict) and extra.get("id") and not any(m["label"] == extra.get("label") for m in models):
-            models.append({"label": extra.get("label", extra["id"]), "provider": extra.get("provider", "anythingllm"),
+            models.append({"label": extra.get("label", extra["id"]), "provider": extra.get("provider", "ollama"),
                            "id": extra["id"], "vision": True})
 
     def is_vision(m):
@@ -226,13 +224,18 @@ def install(ns):
                                           filetypes=[("Audio", AUDIO_TYPES), ("All files", "*.*")])
         if not path:
             return
+        panel = getattr(app, "_aud_panel", None)
+        if panel is not None:
+            panel.options["add"]([path])
+            panel.open()
+            return
         app.status.set("Transcribing audio file...")
         voice = ns["voice"]
 
         def job():
             try:
                 text = voice.transcribe(path, app.voice_cfg, ns["get_client"], app.policy.local_only,
-                                        on_status=lambda t: app.q.put(("status", t)))
+                                            on_status=lambda t: app.q.put(("status", t)), isolated=True)
                 if text:
                     app.q.put(("transcript", f"[Transcript of {Path(path).name}]\n{text}\n"))
                 else:
@@ -245,13 +248,11 @@ def install(ns):
     orig_init = App.__init__
 
     def init(app, *a, **k):
-        app._cv_pending, app._cv_current, app._cv_attach = [], [], {}
+        app._cv_pending, app._cv_current = [], []
         app._cv_new_turn = app._cv_edit_restored = False
         app._cv_thumbs = []
-        holder["app"] = app
         orig_init(app, *a, **k)
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Files and images")
         ttk.Button(strip, text="🖼 Image...", command=lambda: pick_files(app)).pack(side="left", padx=2)
         ttk.Button(strip, text="📋 Paste image", command=lambda: paste(app)).pack(side="left", padx=2)
         ttk.Button(strip, text="🖥 Screen", command=lambda: grab_screen(app)).pack(side="left", padx=2)
@@ -313,7 +314,7 @@ def install(ns):
         msgs, ev = orig_build(app, user_text, base)
         attach = {}
         keep = int(cfg.get("history_images", 1))
-        if keep > 0:
+        if keep > 0 and app.turn.document_source != "Only use chat documents":
             hist = base[-20:]
             found = [j for j, m in enumerate(hist) if m["role"] == "user" and m.get("images")]
             for j in found[-keep:]:
@@ -323,7 +324,10 @@ def install(ns):
         urls = load_urls(app, app._cv_current)
         if urls:
             attach[len(msgs) - 1] = urls
-        app._cv_attach = attach
+        if attach:
+            for index, images in attach.items():
+                msgs[index] = with_images(msgs[index], images)
+            msgs[0] = dict(msgs[0], content=msgs[0]["content"] + "\n\n" + IMAGE_HINT)
         return msgs, ev
 
     orig_render = App.render_chat
@@ -379,14 +383,6 @@ def install(ns):
     orig_run = streaming.run_chat
 
     def run_chat(order, messages, get_client, token, policy, on_status=None, on_delta=None):
-        app = holder.get("app")
-        attach = getattr(app, "_cv_attach", None) if app else None
-        if attach and messages and messages[0].get("content") != ns.get("DECIDE_PROMPT"):
-            messages = copy.deepcopy(messages)
-            for idx, urls in attach.items():
-                if idx < len(messages) and messages[idx]["role"] == "user" and isinstance(messages[idx]["content"], str):
-                    messages[idx] = with_images(messages[idx], urls)
-            messages[0]["content"] += "\n\n" + IMAGE_HINT
         if any(isinstance(m.get("content"), list) for m in messages):
             usable = [m for m in order if is_vision(m)]
             if not usable:

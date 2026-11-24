@@ -300,11 +300,8 @@ def install(ns):
         app._files_bound = set()
         original_init(app, *a, **k)
         app._files = Files(app, ns)
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Files and images")
         ttk.Button(strip, text="Files...", command=app._files.open).pack(side="left", padx=2)
-        ttk.Label(strip, text="Cerry makes Python / Word / PDF / Excel files and edits your PDF / Word files - or type /files",
-                  style="Muted.TLabel").pack(side="left", padx=8)
 
     def send(app):
         if app.inp.get("1.0", "end").strip().lower() == "/files":

@@ -10,7 +10,14 @@ callbacks and can be stopped between steps:
 Needs: pip install faster-whisper        (speaker labels also: pip install pyannote.audio, plus HF_TOKEN in key.env)
 """
 import bisect
+import atexit
+import json
+import os
+import queue
 import shutil
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -109,7 +116,7 @@ def decode(path):
 
 
 def transcribe_file(path, model_name='small', language=None, on_progress=None, words=False,
-                    on_segment=None, on_status=None, should_stop=None):
+                    on_segment=None, on_status=None, should_stop=None, conservative=False, hint=None):
     """Decode once, transcribe, and keep the audio array for the speaker step."""
     say = on_status or (lambda t: None)
     stop = should_stop or (lambda: False)
@@ -122,7 +129,7 @@ def transcribe_file(path, model_name='small', language=None, on_progress=None, w
     if stop():
         raise Stopped()
     say('Transcribing ...')
-    segments, info = model.transcribe(audio, language=language, beam_size=5, vad_filter=True,
+    segments, info = model.transcribe(audio, language=language, beam_size=1, initial_prompt=hint or None, vad_filter=not conservative,
                                       word_timestamps=words)
     duration = float(getattr(info, 'duration', 0) or 0) or len(audio) / 16000.0
     if on_progress:
@@ -236,17 +243,91 @@ def make_lines(res, turns=None):
     return out, len(names)
 
 
+class WorkerExited(RuntimeError):
+    pass
+
+
+def _run_stage(request, callbacks, should_stop):
+    process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("audio_worker.py"))],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    cleanup = process.kill
+    atexit.register(cleanup)
+    events = queue.Queue()
+
+    def read_events():
+        try:
+            for line in process.stdout:
+                events.put(json.loads(line))
+        except (ValueError, OSError) as exc:
+            events.put(("error", str(exc)))
+        finally:
+            events.put(None)
+
+    reader = threading.Thread(target=read_events, daemon=True)
+    reader.start()
+    try:
+        process.stdin.write(json.dumps(request))
+        process.stdin.close()
+        result = None
+        last_event = time.monotonic()
+        while True:
+            if should_stop and should_stop():
+                raise Stopped()
+            try:
+                event = events.get(timeout=0.15)
+            except queue.Empty:
+                if time.monotonic() - last_event > 300:
+                    raise TimeoutError(f"{request['stage']} made no progress for five minutes.")
+                continue
+            last_event = time.monotonic()
+            if event is None:
+                break
+            kind, *args = event
+            if kind == "result":
+                result = args[0]
+            elif kind == "error":
+                raise RuntimeError(args[0])
+            elif callbacks.get(kind):
+                callbacks[kind](*args)
+        code = process.wait()
+        if code or result is None:
+            raise WorkerExited(f"{request['stage']} worker exited (code {code:#x}).")
+        return result
+    finally:
+        process.kill()
+        process.wait()
+        reader.join()
+        process.stdout.close()
+        process.stdin.close()
+        atexit.unregister(cleanup)
+
+
 def analyze(path, model_name='small', language=None, label_speakers=False, num_speakers=None,
-            token=None, on_progress=None, on_status=None, on_segment=None, on_step=None, should_stop=None):
+            token=None, on_progress=None, on_status=None, on_segment=None, on_step=None, should_stop=None,
+            on_transcribed=None, hint=None):
     """Transcribe, optionally label speakers. Never fails just because the speaker step fails."""
-    res = transcribe_file(path, model_name, language, on_progress, words=label_speakers,
-                          on_segment=on_segment, on_status=on_status, should_stop=should_stop)
+    callbacks = dict(status=on_status, progress=on_progress, segment=on_segment, step=on_step)
+    request = dict(stage="Transcription", path=str(path), model=model_name, language=language,
+                   words=bool(label_speakers and token), conservative=False, hint=hint)
+    try:
+        res = _run_stage(request, callbacks, should_stop)
+    except WorkerExited:
+        if on_status:
+            on_status("Retrying transcription without voice detection or word alignment ...")
+        request.update(words=False, conservative=True)
+        res = _run_stage(request, callbacks, should_stop)
     turns, warning = None, ''
     if label_speakers and res['segs']:
+        if on_transcribed:
+            on_transcribed(res)
         try:
             if on_status:
                 on_status('Identifying speakers (this can take a while on a CPU) ...')
-            turns = diarize(res['audio'], num_speakers, token, on_step, should_stop)
+            if not token:
+                raise ValueError("HF_TOKEN is missing in key.env.")
+            turns = _run_stage(dict(stage="Speaker identification", path=str(path), token=token,
+                                    num_speakers=num_speakers), callbacks, should_stop)
         except Stopped:
             raise
         except Exception as e:
@@ -258,6 +339,8 @@ def analyze(path, model_name='small', language=None, label_speakers=False, num_s
 
 
 def build_text(res, name):
+    if res.get("partial"):
+        return f"Partial audio transcript of {name}\n" + "\n".join(res["lines"])
     spk = f" | speakers: {res['speakers']}" if res.get('speakers') else ''
     head = (f"Audio transcript of {name} | language: {res['language']} "
             f"({res['probability']:.0%}) | duration: {fmt_time(res['duration'])}{spk} | "
@@ -279,7 +362,8 @@ def save_transcript(res, src, docs_dir, audio_dir):
     src = Path(src)
     Path(docs_dir).mkdir(parents=True, exist_ok=True)
     Path(audio_dir).mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, unique(audio_dir, src.name))
+    if src.parent.resolve() != Path(audio_dir).resolve():
+        shutil.copy2(src, unique(audio_dir, src.name))
     text = build_text(res, src.name)
     out = unique(docs_dir, f'{src.stem}_transcript.txt')
     out.write_text(text, encoding='utf-8')

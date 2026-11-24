@@ -34,7 +34,7 @@ from pathlib import Path
 from urllib import robotparser
 from urllib.parse import urlsplit, urlunsplit, parse_qs
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 
 import httpx
 
@@ -103,7 +103,7 @@ DEFAULTS = {
     "web_sites": ["euraxess.ec.europa.eu/jobs", "jobs.ac.uk", "academicpositions.com", "nature.com/naturecareers"],
     "min_score": 60, "max_jobs": 8, "per_source": 15, "max_candidates": 60, "days_back": 30,
     "jobspy_calls": 6, "jobspy_pause_s": 5,
-    "tailor": True, "formats": ["docx", "pdf"], "doc_language": "English",
+    "tailor": False, "formats": ["docx", "pdf"], "doc_language": "English",
     "letter_instructions": "", "model": "",
 }
 DOC_LANG_CHOICES = ["English", "Posting language (if I speak it at B2 or better)"]
@@ -1353,7 +1353,7 @@ class Hunter:
         rec["folder"] = str(f)
         return f
 
-    def process_job(self, rec, desc, a, profile, cv_text):
+    def process_job(self, rec, desc, a, profile, cv_text, documents=None):
         for k in ("reasons", "gaps", "top_keywords", "languages_required"):
             if not isinstance(a.get(k), list):
                 a[k] = []
@@ -1377,21 +1377,26 @@ class Hunter:
         atomic_json(folder / "job.json", dict({k: v for k, v in rec.items() if k != "analysis"}, analysis=a))
         self.save_db()
         self.write_index()
-        if self.cfg.get("tailor", True):
-            self.tailor(rec, desc, a, profile, cv_text, folder, lang)
+        if documents or self.cfg.get("tailor", False):
+            self.tailor(rec, desc, a, profile, cv_text, folder, lang, letter_only=documents == "letter")
 
-    def tailor(self, rec, desc, a, profile, cv_text, folder, lang):
+    def tailor(self, rec, desc, a, profile, cv_text, folder, lang, letter_only=False):
         keywords = ", ".join(a["top_keywords"])
         name = clean_value(profile.get("name")) or "the candidate"
         job, cvt = clip(desc, 7500), clip(cv_text, 12000)
-        self.progress(f"Writing CV for {rec['employer'][:30]}")
-        self.log("  writing the tailored CV ...")
-        cv = clean_markdown(self.llm(CV_SYSTEM, CV_USER.format(
-            lang=lang, words=750, summary=a.get("summary", ""), keywords=keywords, job=job, cv=cvt)))
+        cv = ""
+        if not letter_only:
+            self.progress(f"Writing CV for {rec['employer'][:30]}")
+            self.log("  writing the tailored CV ...")
+            cv = clean_markdown(self.llm(CV_SYSTEM, CV_USER.format(
+                lang=lang, words=750, summary=a.get("summary", ""), keywords=keywords, job=job, cv=cvt)))
         self.progress(f"Writing cover letter for {rec['employer'][:30]}")
         self.log("  writing the cover letter ...")
         extra = ("Extra instructions from the candidate: " + self.cfg["letter_instructions"].strip() + "\n"
                  if self.cfg.get("letter_instructions", "").strip() else "")
+        if rec.get("letter_focus"):
+            extra += ("For this role, emphasize the following where supported by the CV: "
+                      + rec["letter_focus"] + "\n")
         letter = clean_markdown(self.llm(LETTER_SYSTEM, LETTER_USER.format(
             lang=lang, words=300, name=name, extra=extra, title=rec["title"], employer=rec["employer"],
             location=rec["location"], summary=a.get("summary", ""), keywords=keywords, job=job, cv=cvt)))
@@ -1402,6 +1407,8 @@ class Hunter:
                 cv=cvt, job=job, title=rec["title"], employer=rec["employer"], tcv=cv, letter=letter))
             bad_cv = [str(x) for x in chk.get("cv", []) if clean_value(x)]
             bad_letter = [str(x) for x in chk.get("letter", []) if clean_value(x)]
+            if letter_only:
+                bad_cv = []
             if bad_cv:
                 self.log(f"  fixing {len(bad_cv)} unsupported claim(s) in the CV")
                 cv = clean_markdown(self.llm(FIX_SYSTEM, FIX_USER.format(
@@ -1419,19 +1426,21 @@ class Hunter:
                     cv=cvt, job=job, title=rec["title"], employer=rec["employer"], tcv=cv, letter=letter))
                 remaining_cv = [str(x) for x in final_check.get("cv", []) if clean_value(x)]
                 remaining_letter = [str(x) for x in final_check.get("letter", []) if clean_value(x)]
-                notes.extend(f"Still needs review in CV: {x}" for x in remaining_cv)
+                if not letter_only:
+                    notes.extend(f"Still needs review in CV: {x}" for x in remaining_cv)
                 notes.extend(f"Still needs review in letter: {x}" for x in remaining_letter)
         except JobError as e:
-            notes = [f"Fact check could not run ({e}). Read both documents carefully."]
-        (folder / "fact_check.md").write_text(
-            "# Fact check against your CV\n\n" + ("\n".join(f"- {n}" for n in notes) if notes
-                                                  else "No unsupported claims found.")
-            + "\n\nAlways read both documents before you send them.\n", encoding="utf-8")
-        self.save_docs(folder, "CV_tailored", cv)
+            notes = [f"Fact check could not run ({e}). Review the draft before sending."]
+        report = "# Fact check against your CV\n\n" + ("\n".join(f"- {n}" for n in notes)
+                                                      or "No unsupported claims found.")
+        if not letter_only:
+            (folder / "fact_check.md").write_text(report, encoding="utf-8")
+            self.save_docs(folder, "CV_tailored", cv)
         self.save_docs(folder, "CoverLetter", letter)
-        rec["tailored"] = dt.datetime.now().isoformat(timespec="seconds")
+        (folder / "cover_letter_check.md").write_text(report, encoding="utf-8")
+        rec["letter_updated" if letter_only else "tailored"] = dt.datetime.now().isoformat(timespec="seconds")
         self.upsert(rec)
-        self.log(f"  folder ready: {folder.name}" + (f"  ({len(notes)} fact-check note(s), see fact_check.md)" if notes else ""))
+        self.log(f"  folder ready: {folder.name}" + (f"  ({len(notes)} fact-check note(s))" if notes else ""))
 
     def save_docs(self, folder, stem, markdown):
         md_dir = folder / "markdown"
@@ -1501,12 +1510,19 @@ class Hunter:
                 c = {"id": rec["id"], "url": rec["url"], "source": rec["source"], "title": rec["title"],
                      "employer": rec["employer"], "location": rec["location"], "snippet": "", "description": "",
                      "partial": True, "ref": ""}
-                desc = self.description_for(c)
+                posting = Path(rec["folder"]) / "job.md" if rec.get("folder") else None
+                desc = (posting.read_text(encoding="utf-8").partition("\n## Posting text\n\n")[2].strip()
+                        if posting and posting.is_file() else "")
+                if not desc and not self.offline():
+                    desc = self.description_for(c)
+                if len(desc) < 250:
+                    raise JobError("A readable job posting is needed to draft application documents.")
                 if rec["status"] not in ("saved", "applied"):
                     rec["status"] = "saved"
                 self.log(f"Preparing documents for: {rec['title']} - {rec['employer']}")
-                self.process_job(rec, desc, a, profile, cv_text)
-                summary = "Documents ready."
+                letter_only = command == "__letter__"
+                self.process_job(rec, desc, a, profile, cv_text, documents="letter" if letter_only else "both")
+                summary = "Cover letter ready to review." if letter_only else "Documents ready."
             else:
                 if not self.my_languages():
                     self.log("Note: your language list is empty - the language check is off.")
@@ -1602,7 +1618,7 @@ class Hunter:
         labels = ["(model chosen in the main window)"] + [m["label"] for m in self.ns["MODELS"]]
         self.model_var = tk.StringVar(value=self.cfg.get("model") or labels[0])
         ttk.Combobox(opt, textvariable=self.model_var, values=labels, state="readonly", width=38).pack(side="left", padx=6)
-        self.tailor_var = tk.BooleanVar(value=bool(self.cfg.get("tailor", True)))
+        self.tailor_var = tk.BooleanVar(value=bool(self.cfg.get("tailor", False)))
         ttk.Checkbutton(opt, text="Also write tailored CV and cover letter", variable=self.tailor_var).pack(side="left", padx=12)
         self.show_all = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="Show excluded and skipped too", variable=self.show_all,
@@ -1638,6 +1654,13 @@ class Hunter:
         t1, t2 = ttk.Frame(nb), ttk.Frame(nb)
         nb.add(t1, text="Activity (live)")
         nb.add(t2, text="Selected job")
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Cover letter")
+        draft = ttk.Button(tab, text="Draft cover letter", command=lambda: self.prepare_selected(letter_only=True))
+        draft.pack(anchor="w", padx=4, pady=4)
+        self.run_buttons.append(draft)
+        self.letter_box = scrolledtext.ScrolledText(tab, wrap="word", state="disabled", height=14)
+        self.letter_box.pack(fill="both", expand=True)
         self.log_box = scrolledtext.ScrolledText(t1, wrap="word", state="disabled", height=14)
         self.log_box.pack(fill="both", expand=True)
         self.detail_box = scrolledtext.ScrolledText(t2, wrap="word", state="disabled", height=14)
@@ -1649,6 +1672,7 @@ class Hunter:
         self.log_box.config(state="disabled")
         self.set_buttons()
         self.refresh()
+        self.show_selected()
 
     def selected(self):
         if not self.alive():
@@ -1675,6 +1699,24 @@ class Hunter:
 
     def show_selected(self):
         j = self.selected()
+        letter = "Select a job to draft or review its cover letter."
+        if j:
+            letter = "Choose Draft cover letter to prepare a letter for this role."
+            if j.get("folder"):
+                folder = Path(j["folder"])
+                draft = folder / "markdown" / "CoverLetter.md"
+                if draft.is_file():
+                    letter = draft.read_text(encoding="utf-8", errors="replace")
+                    check = folder / "cover_letter_check.md"
+                    if not check.is_file():
+                        check = folder / "fact_check.md"
+                    if check.is_file():
+                        letter += "\n\n" + check.read_text(encoding="utf-8", errors="replace")
+            letter = f"{j['title']} — {j['employer']}\n\n" + letter
+        self.letter_box.configure(state="normal")
+        self.letter_box.delete("1.0", "end")
+        self.letter_box.insert("1.0", letter)
+        self.letter_box.configure(state="disabled")
         if not j or not self.alive():
             return
         report = Path(j["folder"]) / "match_report.md" if j.get("folder") else None
@@ -1721,14 +1763,24 @@ class Hunter:
             self.write_index()
             self.refresh()
 
-    def prepare_selected(self):
+    def prepare_selected(self, letter_only=False):
         j = self.selected()
         if not j:
             return
-        if messagebox.askyesno("Prepare documents", f"Create the folder and the tailored CV + cover letter for:\n\n"
-                               f"{j['title']} - {j['employer']}\n\nThis uses your chosen model.", parent=self.parent()):
-            self.apply_window_options()
-            self.start("", retailor=j["id"])
+        docs = "cover letter" if letter_only else "tailored CV and cover letter"
+        if letter_only:
+            focus = simpledialog.askstring("Draft cover letter",
+                f"{j['title']} at {j['employer']}\n\nWhich experience should the letter emphasize? (optional)"
+                "\n\nOK generates a draft and replaces any existing letter for this role.",
+                initialvalue=j.get("letter_focus", ""), parent=self.parent())
+            if focus is None:
+                return
+            j["letter_focus"] = focus.strip()
+        elif not messagebox.askyesno("Prepare documents", f"Generate the {docs} for {j['title']} at {j['employer']}?\n\n"
+                                     "Existing versions of these documents will be replaced.", parent=self.parent()):
+            return
+        self.apply_window_options()
+        self.start("__letter__" if letter_only else "", retailor=j["id"])
 
     def forget_skipped(self):
         n = len(self.jobs)
@@ -1962,14 +2014,11 @@ def install(ns):
     def init(app, *a, **k):
         orig_init(app, *a, **k)
         app.jobhunter = Hunter(app, ns)
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Jobs")
         ttk.Button(strip, text="Jobs...", command=app.jobhunter.panel).pack(side="left", padx=2)
         stop = ttk.Button(strip, text="Stop job search", command=app.jobhunter.request_stop, state="disabled")
         stop.pack(side="left", padx=2)
         app.jobhunter.stop_buttons.append(stop)
-        ttk.Label(strip, text="Find jobs and prepare CV + cover letter - or type /job <what to look for>",
-                  style="Muted.TLabel").pack(side="left", padx=8)
 
     def send(app):
         text = app.inp.get("1.0", "end").strip()

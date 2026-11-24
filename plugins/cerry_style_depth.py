@@ -98,8 +98,7 @@ def install(ns):
     if App.__dict__.get('_writing_depth_extension_installed'):
         return
     style = importlib.import_module('cerry_style')
-    if not App.__dict__.get('_style_plugin_installed'):
-        style.install(ns)
+    style.install(ns)  # The base plugin handles its own installation guard.
     engine = style.se
     style.DEFAULTS['examples'] = 3
     style.DEFAULTS.setdefault('study_depth', 'Standard')

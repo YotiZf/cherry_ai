@@ -232,6 +232,8 @@ def install(ns):
 
     def init(app, *a, **k):
         original_init(app, *a, **k)
+        if hasattr(app, "sidebar"):
+            return
         app._layout_state = dict(base=None, wide=False, holders=[], signature=None,
                                  root=[], frames=[], records=[], chunks=[], busy=False, disabled=False)
         app._layout_job = None

@@ -28,6 +28,11 @@ import threading
 import time
 from pathlib import Path
 
+if __package__:
+    from . import file_scan
+else:
+    import file_scan
+
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 PDF_EXT = {".pdf"}
 SKIP_DIRS = {"__pycache__", "node_modules", "venv", ".venv", "extracted"}
@@ -132,20 +137,8 @@ class WorkItem:
 
 
 def iter_files(sources):
-    for label, folder in sources:
-        folder = Path(folder)
-        if not folder.exists():
-            continue
-        for path in sorted(folder.rglob("*")):
-            if not path.is_file():
-                continue
-            try:
-                rel = path.relative_to(folder)
-            except ValueError:
-                continue
-            if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
-                continue
-            yield path
+    for _, folder in sources:
+        yield from file_scan.iter_files(folder, lambda name: name.startswith(".") or name in SKIP_DIRS)
 
 
 def pdf_page_lengths(path):
@@ -406,4 +399,12 @@ def make_extract(original, store, audio_ext, enabled=lambda: True):
                         merged[n] = t
                 return sorted(merged.items()), "ok", (note + " + OCR/vision pages").strip()
         return pages, status, note
+    def cache_revision(path):
+        ext = path.suffix.lower()
+        if (ext in IMAGE_EXT or ext in audio_ext or ext in PDF_EXT) and enabled():
+            with store.lock:
+                row = store.db.execute("SELECT created FROM results WHERE key=?", (file_key(path),)).fetchone()
+            return row[0] if row else None
+        return None
+    extract.cache_revision = cache_revision
     return extract

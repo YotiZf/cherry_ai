@@ -24,6 +24,8 @@
     "cerry_textsize",
     "cerry_layout",
     "cerry_chat_memory",
+    "cerry_local_agent",
+    "cerry_github",
     "cerry_web_reader"
   ]
 }

@@ -153,12 +153,7 @@ def install(ns):
         original_init(app, *args, **kwargs)
         try:
             hook_jobs()
-            bar = ttk.Frame(app, padding=(6, 0))
-            chat = chat_widget(app)
-            try:
-                bar.pack(fill='x', before=chat.frame)
-            except (tk.TclError, AttributeError):
-                bar.pack(fill='x')
+            bar = app.sidebar.tool_row("Jobs")
             ttk.Button(bar, text='Jobs LaTeX...', command=lambda: panel(app)).pack(side='left')
             tag = 'JobsLatexCommand'
             app.inp.bindtags((tag,) + tuple(app.inp.bindtags()))

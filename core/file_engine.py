@@ -21,6 +21,11 @@ import shutil
 import time
 from pathlib import Path
 
+if __package__:
+    from .file_scan import iter_files
+else:
+    from file_scan import iter_files
+
 TEXT_EXT = {".py", ".txt", ".md", ".csv", ".tsv", ".json", ".html", ".yaml", ".yml", ".tex", ".bib", ".r", ".sql", ".js", ".css", ".xml", ".ini", ".sh", ".bat", ".ps1", ".ipynb"}
 MAKE_EXT = TEXT_EXT | {".docx", ".pdf", ".xlsx"}
 EDIT_EXT = {".pdf", ".docx"}
@@ -594,12 +599,14 @@ def mentioned_files(user_text, folders, exts=(".pdf", ".docx")):
         folder = Path(folder)
         if not folder.is_dir():
             continue
-        for p in sorted(folder.rglob("*")):
-            if p.is_file() and p.suffix.lower() in exts and not any(x.startswith(".") for x in p.relative_to(folder).parts):
+        for p in iter_files(folder, lambda name: name.startswith(".")):
+            if p.suffix.lower() in exts:
                 if p.name.lower() in low or (len(p.stem) >= 4 and p.stem.lower() in low):
                     if p not in found:
                         found.append(p)
-    return found[:3]
+                        if len(found) == 3:
+                            return found
+    return found
 
 
 def page_text(pages, limit=24000):

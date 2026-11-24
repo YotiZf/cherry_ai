@@ -9,11 +9,13 @@ Compared with the old built-in version:
   * files are always read and written as UTF-8.
 """
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
 
 from doc_manager import DocumentIndex
+from document_memory import DocumentMemory
 
 
 def write_atomic(path, text):
@@ -50,8 +52,9 @@ class Workspace:
             try:
                 self.cfg.update(json.loads(self.cfg_path.read_text(encoding="utf-8")))
             except Exception:
+                logging.getLogger(__name__).exception("Could not read workspace config %s", self.cfg_path)
                 pass
-        self.index = DocumentIndex()
+        self.index = DocumentIndex(DocumentMemory(self.dir / "document_memory.sqlite3"), self.sources())
         self._meta = {}        # chat file -> (mtime_ns, size, id, title, workspace)
 
         old_hist = self.dir / "history.json"
@@ -59,6 +62,7 @@ class Workspace:
             try:
                 msgs = json.loads(old_hist.read_text(encoding="utf-8"))
             except Exception:
+                logging.getLogger(__name__).exception("Could not import legacy chat history %s", old_hist)
                 msgs = []
             if msgs:
                 self.save_chat({"id": uuid.uuid4().hex[:8], "title": "Imported chat", "messages": msgs})
@@ -89,6 +93,7 @@ class Workspace:
                     continue          # this chat file belongs to another workspace
                 items.append((st.st_mtime, meta[2], meta[3]))
             except Exception:
+                logging.getLogger(__name__).exception("Could not read chat metadata %s", p)
                 pass
         for gone in set(self._meta) - seen:
             self._meta.pop(gone, None)
@@ -131,11 +136,14 @@ class Workspace:
         self._meta.pop(p, None)
 
     # ---------------------------------------------------------------- documents
-    def reindex(self):
+    def sources(self):
         sources = [("documents", self.docs)]
         if self.cfg.get("folder"):
             sources.append(("linked", self.cfg["folder"]))
-        self.index.build(sources)
+        return sources
+
+    def reindex(self):
+        self.index.build(self.sources())
 
     def read(self, path):
         return Path(path).read_text(encoding="utf-8", errors="ignore").strip()

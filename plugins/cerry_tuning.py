@@ -98,13 +98,14 @@ def install(ns):
 
     def start_generation(app, text, base, target):
         try:
-            wants = (cfg["depth"] == "Thorough" and app.use_ws.get() and app.ws.index.chunks and len(text) >= 15
+            wants = (cfg["depth"] == "Thorough" and app.turn.workspace_context and any(r.chunks for r in app.turn.workspace.index.records) and len(text) >= 15
                      and not getattr(app, "convo_active", False))
         except Exception:
             wants = False
         if not wants:
             return original_start(app, text, base, target)
-        files = te.rank_files(app.ws.index, text[:1500], int(cfg["thorough_files"]))
+        files = te.rank_files(app.turn.workspace.index, text[:1500], int(cfg["thorough_files"]),
+                              app.turn.workspace.excluded)
         if not files:
             return original_start(app, text, base, target)
         streaming, routing = ns["streaming"], ns["routing"]
@@ -112,7 +113,7 @@ def install(ns):
         app.token, app.busy = token, True
         app.send_btn.config(state="disabled")
         app.stop_btn.config(state="normal")
-        model, policy = app.selected_model(), app.policy
+        model, policy = app.turn.model, app.turn.policy
         box = {"done": False, "notes": "", "error": "", "stopped": False}
 
         def ask(system, user):
@@ -122,7 +123,7 @@ def install(ns):
 
         def job():
             try:
-                box["notes"] = te.study(text[:1500], files, doc_manager.read_full_text, ask, int(cfg["section_chars"]),
+                box["notes"] = te.study(text[:1500], files, app.turn.workspace.index.full_text, ask, int(cfg["section_chars"]),
                                         int(cfg["thorough_sections"]), lambda t: app.q.put(("status", t)), token.is_set)
             except (InterruptedError, streaming.Cancelled):
                 box["stopped"] = True
@@ -157,12 +158,6 @@ def install(ns):
 
     def init(app, *a, **k):
         original_init(app, *a, **k)
-        strip = ttk.Frame(app, padding=(6, 2))
-        strip._dock_skip = True                              # the tabbed tool panel must leave this row where it is
-        try:
-            strip.pack(fill="x", before=app.chat_w.frame)
-        except tk.TclError:
-            strip.pack(fill="x", before=app.inp.master)
         vars_ = {"thinking": tk.StringVar(value=cfg["thinking"]), "temperature": tk.StringVar(value=str(cfg["temperature"])),
                  "depth": tk.StringVar(value=cfg["depth"])}
 
@@ -176,17 +171,20 @@ def install(ns):
                 save()
                 app.status.set(hint(value))
             return handler
+        strip = app.sidebar.tool_row("Response settings")
         ttk.Label(strip, text="Thinking:").pack(side="left")
         box = ttk.Combobox(strip, textvariable=vars_["thinking"], values=te.THINK_LEVELS, state="readonly", width=9)
         box.pack(side="left", padx=(3, 12))
         box.bind("<<ComboboxSelected>>", changed("thinking", lambda v: f"Thinking: {v}" + (
             " - the instruction is added to every chat request" + (", and sent as reasoning_effort to " + ", ".join(cfg["effort_providers"])
                                                                    if cfg["send_effort"] and v != "Default" else "") if v != "Default" else "")))
+        strip = app.sidebar.tool_row("Response settings")
         ttk.Label(strip, text="Temperature:").pack(side="left")
         temp = ttk.Combobox(strip, textvariable=vars_["temperature"], values=TEMPS, width=6)
         temp.pack(side="left", padx=(3, 12))
         for seq in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
             temp.bind(seq, changed("temperature", lambda v: "Temperature: " + ("the model's default" if v == "Auto" else v)))
+        strip = app.sidebar.tool_row("Response settings")
         ttk.Label(strip, text="Study depth:").pack(side="left")
         depth = ttk.Combobox(strip, textvariable=vars_["depth"], values=te.DEPTH_LEVELS, state="readonly", width=10)
         depth.pack(side="left", padx=(3, 12))
@@ -195,13 +193,6 @@ def install(ns):
             "Deep": "Study depth Deep: 12 passages, each with the text around it.",
             "Thorough": "Study depth Thorough: the most relevant files are read completely first (slower, many model calls)."}[v]))
 
-        def open_style():
-            style = getattr(app, "_style", None)
-            if style is not None:
-                style.open()
-            else:
-                app.status.set("Writing style: add cerry_style to plugins.json.")
-        ttk.Button(strip, text="Writing style...", command=open_style).pack(side="left", padx=4)
         app._tuning_vars = vars_
 
     App.__init__ = init

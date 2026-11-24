@@ -38,6 +38,7 @@ import threading
 import time
 import traceback
 import webbrowser
+from itertools import islice
 from pathlib import Path
 from urllib.parse import quote
 import tkinter as tk
@@ -258,21 +259,26 @@ class Gh:
 
 def prepare_write(gh, owner, repo, branch, path, base_branch, base_sha):
     """Look up what a write needs, without changing anything."""
-    exists = gh.branch_sha(owner, repo, branch) is not None
-    if exists:
-        return {'branch_exists': True, 'sha': gh.file_sha(owner, repo, path, branch)}
-    return {'branch_exists': False, 'sha': base_sha}
+    head = gh.branch_sha(owner, repo, branch)
+    exists = head is not None
+    if not exists:
+        head = gh.branch_sha(owner, repo, base_branch)
+        if not head:
+            raise GhError(404, 'Base branch not found: ' + base_branch)
+    if gh.file_sha(owner, repo, path, head) != base_sha:
+        if base_sha is None:
+            raise GhError(409, 'This path already exists on the destination. Open the existing file to edit it.')
+        raise GhError(409, 'The destination version differs from the file you opened. '
+                      'Load the destination branch and reopen the file before editing it.')
+    return {'branch_exists': exists, 'sha': base_sha, 'create_from': None if exists else head}
 
 
 def commit_write(gh, owner, repo, branch, base_branch, path, data, message, sha, delete=False,
-                 default_branch='', allow_default=False):
+                 default_branch='', allow_default=False, create_from=None):
     if branch == default_branch and not allow_default:
         raise PermissionError('Committing to the default branch is switched off. Use a working branch.')
-    if gh.branch_sha(owner, repo, branch) is None:
-        start = gh.branch_sha(owner, repo, base_branch)
-        if start is None:
-            raise GhError(404, 'Base branch not found: ' + base_branch)
-        gh.create_branch(owner, repo, branch, start)
+    if create_from:
+        gh.create_branch(owner, repo, branch, create_from)
     if delete:
         if not sha:
             raise GhError(404, 'The file does not exist on the working branch.')
@@ -281,10 +287,10 @@ def commit_write(gh, owner, repo, branch, base_branch, path, data, message, sha,
 
 
 def make_diff(old, new):
-    lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), 'before', 'after', lineterm='', n=1))
-    added = sum(1 for l in lines if l.startswith('+') and not l.startswith('+++'))
-    removed = sum(1 for l in lines if l.startswith('-') and not l.startswith('---'))
-    shown = '\n'.join(lines[:60]) + ('\n... (diff shortened)' if len(lines) > 60 else '')
+    lines = list(difflib.unified_diff(old.splitlines(True), new.splitlines(True), 'before', 'after', n=3))
+    added = sum(line.startswith('+') for line in lines[2:])
+    removed = sum(line.startswith('-') for line in lines[2:])
+    shown = ''.join(line if line.endswith('\n') else line + '\n\\ No newline at end of file\n' for line in lines)
     return added, removed, shown
 
 
@@ -372,6 +378,7 @@ class Panel:
         self.win = None
         self.files = []
         self.info = {}
+        self.loaded_target = None
         self.current = None
         self.before_edit = None
         self.busy = False
@@ -454,8 +461,9 @@ class Panel:
         ttk.Button(top, text='Load files', command=self.load_tree).grid(row=1, column=5, padx=6)
         ttk.Label(top, text='Write to branch:').grid(row=2, column=0, sticky='w')
         ttk.Entry(top, textvariable=self.write_var, width=44).grid(row=2, column=1, columnspan=2, sticky='w', padx=4)
+        ttk.Button(top, text='Use loaded branch', command=self.use_loaded_branch).grid(row=2, column=3)
         ttk.Checkbutton(top, text='Allow commits to the default branch', variable=self.allow_default).grid(
-            row=2, column=3, columnspan=3, sticky='w')
+            row=2, column=4, columnspan=2, sticky='w')
         body = ttk.PanedWindow(win, orient='horizontal')
         body.pack(fill='both', expand=True, padx=6, pady=4)
         left = ttk.Frame(body)
@@ -605,7 +613,11 @@ class Panel:
         def done(result, error):
             if error:
                 return self.say(str(error))
+            if self.repo_var.get().strip() != requested_repo or self.read_var.get().strip() != branch_typed:
+                return self.say('The selection changed. Load the selected repository and branch.')
             self.info, branch, self.files, truncated = result
+            self.loaded_target = (owner, repo, branch)
+            self.allow_default.set(False)
             self.read_var.set(branch)
             self.owner_var.set(owner)
             self.fill_list()
@@ -620,14 +632,15 @@ class Panel:
             else:
                 can = 'You can write to this repository.' if perms.get('push') else 'This token cannot push to it: read-only.'
             self.say('%d files on %s. %s%s' % (len(self.files), branch, can, ' List was truncated by GitHub.' if truncated else ''))
+        requested_repo = self.repo_var.get().strip()
         self.bg(work, done)
 
     def fill_list(self):
         needle = self.filter_var.get().strip().lower()
-        shown = [f for f in self.files if needle in f.lower()][:SHOW_LIMIT]
+        shown = list(islice((f for f in self.files if needle in f.lower()), SHOW_LIMIT))
         self.listbox.delete(0, 'end')
-        for f in shown:
-            self.listbox.insert('end', f)
+        if shown:
+            self.listbox.insert('end', *shown)
 
     def selected_paths(self):
         return [self.listbox.get(i) for i in self.listbox.curselection()]
@@ -643,6 +656,8 @@ class Panel:
         except ValueError as e:
             return messagebox.showerror('GitHub', str(e), parent=self.win)
         branch = self.read_branch()
+        if self.loaded_target != (owner, repo, branch):
+            return self.say('Load the selected repository and branch first.')
         self.say('Opening ' + path + ' ...')
 
         def done(result, error):
@@ -653,7 +668,7 @@ class Panel:
                 text = raw.decode('utf-8')
             except UnicodeDecodeError:
                 return self.say('This looks like a binary file; Cerry opens text files only.')
-            self.current = {'path': path, 'sha': sha, 'orig': text, 'new': False}
+            self.current = {'path': path, 'sha': sha, 'orig': text, 'new': False, 'target': (owner, repo, branch)}
             self.before_edit = None
             self.editor.delete('1.0', 'end')
             self.editor.insert('1.0', text)
@@ -669,7 +684,13 @@ class Panel:
             path = clean_path(path)
         except ValueError as e:
             return messagebox.showerror('GitHub', str(e), parent=self.win)
-        self.current = {'path': path, 'sha': None, 'orig': '', 'new': True}
+        try:
+            target = (*self.repo_target(), self.read_branch())
+        except ValueError as e:
+            return self.say(str(e))
+        if self.loaded_target != target:
+            return self.say('Load the selected repository and branch first.')
+        self.current = {'path': path, 'sha': None, 'orig': '', 'new': True, 'target': self.loaded_target}
         self.before_edit = None
         self.editor.delete('1.0', 'end')
         self.file_label.set(path + '  (new file, not yet on GitHub)')
@@ -789,6 +810,7 @@ class Panel:
         instruction = self.ask_var.get().strip()
         if not instruction:
             return self.say('Type your question or instruction in the box first.')
+        current = self.current
         text = self.editor.get('1.0', 'end-1c')
         if len(text) > ASK_LIMIT:
             return self.say('The file is longer than %d characters; select a smaller file for Cerry.' % ASK_LIMIT)
@@ -814,6 +836,8 @@ class Panel:
             if error:
                 return self.say('Cerry could not answer: %s' % error)
             if edit:
+                if self.current is not current or self.editor.get('1.0', 'end-1c') != text:
+                    return self.say('The editor changed while Cherry was working. Run the instruction again.')
                 proposal = strip_fences(answer)
                 if not messagebox.askyesno('Use Cerry\'s version?', 'Replace the editor text with Cerry\'s proposal?\n\n'
                                            'Nothing is sent to GitHub until you press Commit changes (you will see a diff).',
@@ -839,10 +863,43 @@ class Panel:
         webbrowser.open('https://github.com/%s/%s' % (owner, repo))
 
     # ------------------------------------------------------------ writing
+    def use_loaded_branch(self):
+        if self.loaded_target:
+            self.write_var.set(self.loaded_target[2])
+        else:
+            self.say('Load the repository first.')
+
+    def approve_change(self, details, diff):
+        dialog = tk.Toplevel(self.win)
+        dialog.title('Review GitHub commit')
+        dialog.transient(self.win)
+        ttk.Label(dialog, text=details, padding=8).pack(anchor='w')
+        preview = scrolledtext.ScrolledText(dialog, width=95, height=22, wrap='char')
+        preview.pack(fill='both', expand=True, padx=8)
+        preview.insert('1.0', diff or '(Empty file)')
+        preview.configure(state='disabled')
+        approved = False
+
+        def approve():
+            nonlocal approved
+            approved = True
+            dialog.destroy()
+
+        actions = ttk.Frame(dialog, padding=8)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='Commit to GitHub', command=approve).pack(side='right')
+        ttk.Button(actions, text='Cancel', command=dialog.destroy).pack(side='right', padx=4)
+        dialog.wait_visibility()
+        dialog.grab_set()
+        dialog.wait_window()
+        return approved
+
     def write_settings(self):
         owner, repo = self.repo_target()
         write_branch = clean_branch(self.write_var.get())
         base = clean_branch(self.read_branch())
+        if self.loaded_target != (owner, repo, base) or self.current['target'] != self.loaded_target:
+            raise ValueError('Load the selected repository and branch, then open or create the file there.')
         default = self.info.get('default_branch', '')
         if write_branch == default and not self.allow_default.get():
             raise ValueError('The working branch is the default branch. Choose another name, or tick the permission box.')
@@ -880,33 +937,33 @@ class Panel:
         def after_prepare(state, error):
             if error:
                 return self.say(str(error))
-            if not delete and cur['new'] and state['sha']:
-                return messagebox.showerror('GitHub', 'This path already exists on the branch. Open that file and edit it '
-                                            'instead.', parent=self.win)
-            if delete and not state['sha']:
-                return messagebox.showerror('GitHub', 'The file does not exist on the working branch.', parent=self.win)
-            added, removed, diff = make_diff(cur['orig'], new_text)
+            added, removed, diff = make_diff(cur['orig'], '' if delete else new_text)
             lines = ['Repository: %s/%s' % (owner, repo),
                      'Branch: %s%s' % (branch, '' if state['branch_exists'] else '  (will be created from %s)' % base),
                      'File: %s' % path, 'Action: %s' % verb, 'Message: %s' % message]
             if delete:
                 lines.append('\nThis removes the file from that branch. Git history keeps the old version.')
             else:
-                lines += ['Changes: +%d / -%d lines' % (added, removed), '', diff]
+                lines += ['Changes: +%d / -%d lines' % (added, removed)]
             if branch == default:
                 lines.insert(0, 'WARNING: this is the default branch.')
-            if not messagebox.askyesno('Approve GitHub change?', '\n'.join(lines)[:3500], parent=self.win):
+            if self.current is not cur or self.editor.get('1.0', 'end-1c') != new_text:
+                return self.say('The editor changed. Review your edits and commit again.')
+            allow_default = self.allow_default.get()
+            if not self.approve_change('\n'.join(lines), diff):
                 return self.say('Cancelled. Nothing was changed on GitHub.')
 
             def write():
                 return commit_write(self.gh, owner, repo, branch, base, path, new_text.encode('utf-8'), message,
-                                    state['sha'], delete, default, self.allow_default.get())
+                                    state['sha'], delete, default, allow_default, state['create_from'])
 
             def finished(result, err):
                 if err:
                     return self.say(str(err))
                 url = (result.get('commit') or {}).get('html_url', '')
                 self.say('Done: %s %s on branch %s. %s' % (verb.lower(), path, branch, url))
+                if self.current is not cur or self.loaded_target != cur['target']:
+                    return
                 if delete:
                     self.files = [f for f in self.files if f != path]
                     self.fill_list()
@@ -939,12 +996,7 @@ def install(ns):
     def init(app, *args, **kwargs):
         original_init(app, *args, **kwargs)
         app.github = Panel(app, ns)
-        bar = ttk.Frame(app, padding=(6, 0))
-        chat = chat_widget(app)
-        try:
-            bar.pack(fill='x', before=chat.frame)
-        except (tk.TclError, AttributeError):
-            bar.pack(fill='x')
+        bar = app.sidebar.tool_row("Files and images")
         ttk.Button(bar, text='GitHub...', command=app.github.open).pack(side='left')
         tag = 'GithubCommand'
         app.inp.bindtags((tag,) + tuple(app.inp.bindtags()))

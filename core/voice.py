@@ -8,16 +8,11 @@ import sys
 import threading
 import time
 import tkinter as tk
+import uuid
 import wave
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from tkinter import ttk
-
-try:
-    from piper import SynthesisConfig
-except Exception:
-    SynthesisConfig = None
-
 
 # ----------------------------------------------------------------------
 # SETTINGS
@@ -127,11 +122,12 @@ class SentenceChunker:
     """Turns streamed text into speakable sentences (skips code blocks, strips markdown)."""
     MIN_CHARS = 25
 
-    def __init__(self):
+    def __init__(self, responsive=False):
         self._raw = ""        # text that may still contain a partial ``` fence
         self.buf = ""         # speakable text waiting for a sentence end
         self.carry = ""       # short sentences waiting to be merged
         self.in_code = False
+        self.responsive = responsive
 
     def _strip_fences(self, text):
         self._raw += text
@@ -169,6 +165,12 @@ class SentenceChunker:
         self.buf += self._strip_fences(text)
         parts = re.split(r'(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9"“(\[])|\n+', self.buf)
         if len(parts) <= 1:
+            if self.responsive and len(self.buf) >= 60:
+                # Speak a natural phrase while the model is still finishing its sentence.
+                cut = self.buf.rfind(" ", 35, 61)
+                if cut > 0:
+                    phrase, self.buf = self.buf[:cut], self.buf[cut + 1:]
+                    return self._take([phrase])
             return []
         self.buf = parts[-1]
         return self._take(parts[:-1])
@@ -248,8 +250,13 @@ class Speaker:
         import numpy as np
         voice = self._load(self.voice_name(lang))
         kwargs = {}
-        if SynthesisConfig is not None and abs(self.cfg.speed - 1.0) > 0.01:
-            kwargs["syn_config"] = SynthesisConfig(length_scale=1.0 / max(self.cfg.speed, 0.3))
+        if abs(self.cfg.speed - 1.0) > 0.01:
+            try:
+                from piper import SynthesisConfig
+            except ImportError:
+                pass  # Older Piper versions only support the default speed.
+            else:
+                kwargs["syn_config"] = SynthesisConfig(length_scale=1.0 / max(self.cfg.speed, 0.3))
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             voice.synthesize_wav(text, wf, **kwargs)
@@ -268,8 +275,8 @@ class Speaker:
             except queue.Full:
                 pass
 
-    def _producer(self, evt, text_q, audio_q):
-        chunker = SentenceChunker()
+    def _producer(self, evt, text_q, audio_q, responsive=False):
+        chunker = SentenceChunker(responsive=responsive)
         prev = self.cfg.default_lang
 
         def speak_sentences(sentences):
@@ -327,7 +334,7 @@ class Speaker:
                 except Exception:
                     pass
 
-    def start_stream(self, on_done=None):
+    def start_stream(self, on_done=None, responsive=False):
         """Begin speaking text that arrives piece by piece. Returns a stream id."""
         self.stop()
         self.last_error = None
@@ -339,7 +346,7 @@ class Speaker:
             sid = self._stream_id
             self._evt = evt
             self._text_q = text_q
-        threading.Thread(target=self._producer, args=(evt, text_q, audio_q), daemon=True).start()
+        threading.Thread(target=self._producer, args=(evt, text_q, audio_q, responsive), daemon=True).start()
         threading.Thread(target=self._consumer, args=(evt, audio_q, on_done, sid), daemon=True).start()
         return sid
 
@@ -501,6 +508,7 @@ class Conversation:
     def __init__(self, cfg, tmp_dir, transcribe_fn, on_event, is_speaking):
         self.cfg = cfg
         self.tmp = Path(tmp_dir)
+        self.session_id = uuid.uuid4().hex
         self.transcribe_fn = transcribe_fn
         self.on_event = on_event
         self.is_speaking = is_speaking
@@ -528,7 +536,7 @@ class Conversation:
                 if not self._ready.wait(0.2):
                     continue
                 self.on_event("state", "listening")
-                path = self.tmp / f"convo_{n % 2}.wav"
+                path = self.tmp / f"convo_{self.session_id}_{n % 2}.wav"
                 n += 1
                 path, reason = record_utterance(
                     path, self.cfg, lambda: not self.active,
@@ -578,7 +586,7 @@ def _norm_lang(value):
 
 
 def _transcribe_groq(path, cfg, get_client, language):
-    client = get_client("groq")
+    client = get_client("groq").with_options(timeout=60, max_retries=0)
 
     def call(lang):
         with open(path, "rb") as f:
@@ -618,7 +626,7 @@ def _transcribe_local(path, cfg, language):
     return text
 
 
-def transcribe(path, cfg, get_client, local_only=False, on_status=None):
+def transcribe(path, cfg, get_client, local_only=False, on_status=None, isolated=False):
     engine = "local" if local_only else cfg.stt_engine
     language = None if cfg.stt_language == "auto" else cfg.stt_language
     if engine == "groq":
@@ -626,13 +634,20 @@ def transcribe(path, cfg, get_client, local_only=False, on_status=None):
             return _transcribe_groq(path, cfg, get_client, language)
         except Exception as first_error:
             try:
-                import faster_whisper  # noqa: F401
+                from importlib.util import find_spec
+                if find_spec("faster_whisper") is None:
+                    raise ImportError
             except ImportError:
                 raise first_error
             if on_status:
                 on_status(f"Groq failed ({str(first_error)[:80]}). Using local Whisper...")
     if on_status:
         on_status("Transcribing locally (the first run downloads the model)...")
+    if isolated:
+        import audio_engine
+        result = audio_engine.analyze(path, cfg.whisper_model, language, on_status=on_status,
+                                      hint=cfg.stt_hint)
+        return " ".join(segment["text"] for segment in result["segs"])
     return _transcribe_local(path, cfg, language)
 
 

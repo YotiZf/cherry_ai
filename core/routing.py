@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from tkinter import ttk
 
-LOCAL_PROVIDERS = {"anythingllm"}
+LOCAL_PROVIDERS = {"ollama"}
 
 ERROR_KINDS = {
     "config": "key missing in key.env",
@@ -38,7 +38,7 @@ def is_local(model):
 class RoutingPolicy:
     local_only: bool = False
     allow_fallback: bool = True
-    allowed_providers: list = field(default_factory=lambda: ["gemini", "groq", "openrouter", "anythingllm"])
+    allowed_providers: list = field(default_factory=lambda: ["gemini", "groq", "openrouter", "ollama"])
     fallback_on: list = field(default_factory=lambda: list(ERROR_KINDS))
 
     @classmethod

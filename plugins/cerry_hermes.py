@@ -513,15 +513,13 @@ def install(ns):
         orig_init(app, *a, **k)
         app.hermes = AgentHub(app, ns, cfg)
         ns['_hermes_hub'] = app.hermes
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Agents")
         ttk.Button(strip, text="Agent...", command=app.hermes.panel).pack(side="left", padx=2)
         def stop_all():
             if app.hermes.running and messagebox.askyesno('Stop all agents',
                     'Request stopping every running Cherry job?', parent=app):
                 app.hermes.request_stop()
         ttk.Button(strip, text='Stop all agents', command=stop_all).pack(side='left', padx=2)
-        ttk.Label(strip, text="Cherry agent - type /cherry <what to do>", style="Muted.TLabel").pack(side="left", padx=8)
 
     def send(app):
         text = app.inp.get("1.0", "end").strip()

@@ -410,8 +410,7 @@ def install(ns):
         w.bind("<Control-a>", lambda e: (w.tag_add("sel", "1.0", "end-1c"), "break")[1])
         w.bind("<Key>", key, add="+")
 
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Chat and export")
         ttk.Button(strip, text="📋 Copy answer", command=lambda: copy_current(app)).pack(side="left", padx=2)
         ttk.Button(strip, text="⬇ Export answer...", command=lambda: export_last(app)).pack(side="left", padx=2)
         ttk.Button(strip, text="⬇ Export chat...", command=lambda: export_dialog(app, None)).pack(side="left", padx=2)

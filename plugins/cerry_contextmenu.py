@@ -3,12 +3,10 @@
 1. Right-click in any text box (chat, input, editors, settings windows) shows
    Cut / Copy / Paste / Delete / Select all.
 2. Resize the box where you type with the mouse: move the pointer to the TOP EDGE of the input box
-   (it turns into an up/down arrow) or onto the dotted bar above it, hold the left button and drag
+   (it turns into an up/down arrow) or onto the resize label in the Display sidebar section, hold the left button and drag
    up (taller) or down (shorter). Double-click resets it. The size is remembered.
 
-The same functions are also on the bar above the input box: [taller] [shorter] [reset] - one click each.
-The bar stays right above the input box, below the tabbed tool panel, and the chat is never squeezed below a
-readable height (the box simply stops growing at that point).
+The Display sidebar section also has taller, shorter and reset buttons.
 
 Switch it on by adding  "cerry_contextmenu"  to the list in  ai_workspace_data/plugins.json
 """
@@ -203,11 +201,8 @@ def install_resize(app, path, saved_lines):
         set_lines(DEFAULT_LINES)
         finish()
 
-    # 1) a visible bar right above the input box: drag it, or use the three buttons
-    bar = ttk.Frame(app)
-    bar._dock_skip = True                               # the tabbed tool panel must leave this bar alone
-    bar.pack(fill="x", before=inp.master)
-    grip = ttk.Label(bar, text="\u22ef\u22ef   drag up or down to resize the input box   \u22ef\u22ef", anchor="center",
+    bar = app.sidebar.tool_row("Display")
+    grip = ttk.Label(bar, text="Drag to resize the message box", anchor="center",
                      cursor="sb_v_double_arrow", style="Muted.TLabel")
     grip.pack(side="left", fill="x", expand=True)
     for text, fn in (("\u25b2 taller", lambda: step(STEP_LINES)), ("\u25bc shorter", lambda: step(-STEP_LINES)),
@@ -263,14 +258,6 @@ def install_resize(app, path, saved_lines):
     inp.bind("<Control-Up>", lambda e: (step(STEP_LINES), "break")[1], add="+")
     inp.bind("<Control-Down>", lambda e: (step(-STEP_LINES), "break")[1], add="+")
 
-    # the tabbed tool panel is built after the plugins have started: put the bar back right above the input box
-    def keep_next_to_input():
-        try:
-            bar.pack_configure(before=inp.master)
-        except tk.TclError:
-            pass
-    app.after(300, keep_next_to_input)
-    app.after(2000, keep_next_to_input)
     return bar
 
 

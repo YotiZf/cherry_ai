@@ -10,6 +10,7 @@ Settings: ai_workspace_data/audio.json (model, language, speakers, auto_open)
 The speech and speaker code is in audio_engine.py.
 """
 import json
+import logging
 import os
 import queue
 import threading
@@ -51,6 +52,7 @@ class Job:
     out: object = None
     text: str = ""
     stop: threading.Event = field(default_factory=threading.Event)
+    keep_transcript: bool = False
 
     @property
     def name(self):
@@ -123,6 +125,9 @@ class AudioQueue:
         job.status, job.stage, job.started_at = "Working", "Starting", time.time()
 
         def on_status(text):
+            if text.startswith("Retrying transcription"):
+                job.lines = []
+                job.done_s, job.trans_at = 0, 0
             job.stage = "Transcribing" if text.startswith("Transcribing") else text
 
         def on_progress(done, total):
@@ -137,10 +142,28 @@ class AudioQueue:
         def on_step(name, completed, total):
             job.stage = f"Speakers: {name}" + (f" {completed}/{total}" if completed is not None and total else "")
 
+        draft = None
+
+        def checkpoint(result):
+            nonlocal draft
+            draft = dict(result, lines=eng.make_lines(result)[0], warning="", speakers=0)
+            job.out, job.text = eng.save_transcript(draft, job.path, job.ws.docs, job.ws.dir / "audio")
+
         try:
-            res = eng.analyze(job.path, job.model, None if job.lang == "auto" else job.lang, job.label,
+            try:
+                res = eng.analyze(job.path, job.model, None if job.lang == "auto" else job.lang, job.label,
                               None if job.nspk == "auto" else job.nspk, self.token_fn(), on_progress, on_status,
-                              on_segment, on_step, lambda: job.stop.is_set())
+                              on_segment, on_step, job.stop.is_set, on_transcribed=checkpoint)
+            except (eng.Stopped, TimeoutError) as exc:
+                if isinstance(exc, eng.Stopped) and not job.keep_transcript:
+                    raise
+                if draft:
+                    res = dict(draft, warning="Speaker identification ended. The transcript is complete.")
+                elif job.lines:
+                    res = dict(lines=list(job.lines), language=job.lang, duration=job.done_s, model=job.model,
+                               speakers=0, probability=0, partial=True, warning="Partial transcript through the last recognized phrase.")
+                else:
+                    raise
             job.language, job.speakers, job.warning = res["language"], res["speakers"], res["warning"]
             job.duration = res["duration"]
             if not res["lines"]:
@@ -148,14 +171,21 @@ class AudioQueue:
             else:
                 job.lines = list(res["lines"])
                 job.stage = "Saving"
-                job.out, job.text = eng.save_transcript(res, job.path, job.ws.docs, job.ws.dir / "audio")
+                if job.out:
+                    from workspace import write_atomic
+                    job.text = eng.build_text(res, job.path.name)
+                    write_atomic(job.out, job.text)
+                else:
+                    job.out, job.text = eng.save_transcript(res, job.path, job.ws.docs, job.ws.dir / "audio")
                 job.status, job.stage, job.done_s = "Done", "Finished", job.duration
                 self.events.put(("done", job, res))
         except eng.Stopped:
-            job.status, job.stage = "Stopped", "Stopped"
+            job.status = "Stopped"
+            job.stage = "Ended before any speech was recognized" if job.keep_transcript else "Stopped"
         except ImportError as e:
             job.status, job.stage, job.error = "Failed", "Package missing", f"A package is missing ({e}). Run: pip install faster-whisper"
         except Exception as e:
+            logging.getLogger(__name__).warning("Audio job %s failed during %s: %s", job.id, job.stage, e)
             job.status, job.stage, job.error = "Failed", "Failed", f"{type(e).__name__}: {str(e)[:300]}"
         finally:
             job.finished_at = time.time()
@@ -190,8 +220,8 @@ class AudioPanel:
         win.geometry("1060x720")
         ttk.Label(win, padding=8, wraplength=1020, text=(
             "Audio and video files are transcribed one after the other with the model chosen in the Audio bar. "
-            "The window can be closed while they run. A stop takes effect after the current sentence "
-            "(or step, while the model is loading).")).pack(fill="x")
+            "End & keep transcript saves the phrases recognized so far. You can open the full text "
+            "as soon as transcription finishes, even while speakers are being identified.")).pack(fill="x")
         cols = [c for c, _ in self.COLS]
         self.table = ttk.Treeview(win, columns=cols, show="headings", selectmode="browse", height=7)
         for c, w in self.COLS:
@@ -203,7 +233,7 @@ class AudioPanel:
         self.table.bind("<<TreeviewSelect>>", lambda e: self.refresh())
         row = ttk.Frame(win, padding=6)
         row.pack(fill="x")
-        for text, fn in (("Add audio files...", self.add_dialog), ("Stop selected", self.stop_selected),
+        for text, fn in (("Add audio files...", self.add_dialog), ("End & keep transcript", self.finish_selected),
                          ("Stop all", self.stop_all), ("Remove finished", self.remove_finished),
                          ("Open transcript", self.open_transcript), ("Open folder", self.open_folder),
                          ("Attach to chat", self.attach_selected)):
@@ -251,11 +281,12 @@ class AudioPanel:
         if paths:
             self.options["add"](list(paths))
 
-    def stop_selected(self):
-        j = self.selected()
+    def finish_selected(self):
+        j = self.selected() or next((job for job in self.q.jobs if job.status == "Working"), None)
         if j:
+            j.keep_transcript = True
             self.q.stop(j)
-            self.note(f"Stop requested for {j.name}.")
+            self.note(f"Ending {j.name}. Recognized speech will be kept.")
 
     def stop_all(self):
         self.q.stop_all()
@@ -266,7 +297,7 @@ class AudioPanel:
         self.refresh()
 
     def open_transcript(self):
-        j = self.selected()
+        j = self.selected() or (self.q.jobs[-1] if self.q.jobs else None)
         if j and j.out and hasattr(os, "startfile"):
             os.startfile(str(j.out))
 
@@ -285,22 +316,27 @@ class AudioPanel:
         if not self.alive():
             return
         now = time.time()
-        keep = self.table.selection()
-        self.table.delete(*self.table.get_children())
+        remaining = set(self.table.get_children())
         for j in self.q.jobs:
             frac, speed, left = j.numbers(now)
             tag = "bad" if j.status == "Failed" else ("done" if j.status == "Done" else "")
-            self.table.insert("", "end", iid=str(j.id), tags=(tag,), values=(
+            values = (
                 j.name, j.status, j.stage[:40], f"{frac:.0%}" if j.duration else "-",
                 eng.fmt_time(j.duration) if j.duration else "-", eng.fmt_short(j.elapsed(now)) if j.started_at else "-",
                 ("done" if j.status == "Done" else eng.fmt_short(left) if left is not None else "-"),
-                f"{speed:.1f}x" if speed else "-"))
+                f"{speed:.1f}x" if speed else "-")
+            iid = str(j.id)
+            if iid in remaining:
+                remaining.remove(iid)
+                self.table.item(iid, tags=(tag,), values=values)
+            else:
+                self.table.insert("", "end", iid=iid, tags=(tag,), values=values)
             last = self.last_stage.get(j.id)
             if last != (j.status, j.stage) and (j.stage != "Transcribing" or not last or last[0] != j.status):
                 self.note(f"{j.name}: {j.status} - {j.stage}" + (f" ({j.error})" if j.error and j.status == "Failed" else ""))
             self.last_stage[j.id] = (j.status, j.stage)
-        if keep and self.table.exists(keep[0]):
-            self.table.selection_set(keep[0])
+        if remaining:
+            self.table.delete(*remaining)
         job = self.selected() or (self.q.jobs[-1] if self.q.jobs else None)
         if job is None:
             return
@@ -319,18 +355,19 @@ class AudioPanel:
         if job.warning:
             parts.append(job.warning)
         self.detail.set("  |  ".join(parts))
-        jid, n = self.shown
-        if jid != job.id:
+        lines = job.lines
+        previous, n = self.shown
+        if previous is not lines:
             self.live.config(state="normal")
             self.live.delete("1.0", "end")
             self.live.config(state="disabled")
             n = 0
-        lines = job.lines
         if len(lines) < n:
             n = 0
-        if len(lines) > n:
-            self._append(self.live, "\n".join(lines[n:]) + "\n")
-        self.shown = (job.id, len(lines))
+        added = lines[n:]
+        if added:
+            self._append(self.live, "\n".join(added) + "\n")
+        self.shown = (lines, n + len(added))
 
 
 def install(ns):
@@ -389,7 +426,8 @@ def install(ns):
                 app.status.set(f"Audio: {work.name} - {work.stage}" + (f" {frac:.0%}" if work.duration else "")
                                + (f", about {eng.fmt_short(left)} left" if left else ""))
         elif app._aud_was_busy:
-            app.status.set("Audio done.")
+            last = app._aud_queue.jobs[-1] if app._aud_queue.jobs else None
+            app.status.set(f"Audio failed: {last.error}" if last and last.status == "Failed" else "Audio queue finished.")
         app._aud_was_busy = busy
         app._aud_panel.refresh()
         app.after(500 if (busy or app._aud_panel.alive()) else 1500, lambda: poll(app))
@@ -410,12 +448,11 @@ def install(ns):
         app._aud_was_busy = False
         app.aud_model = tk.StringVar(value=cfg.get("model", "small"))
         app.aud_lang = tk.StringVar(value=cfg.get("lang", "auto"))
-        app.aud_spk = tk.BooleanVar(value=cfg.get("speakers", True))
+        app.aud_spk = tk.BooleanVar(value=cfg.get("speakers", False))
         app.aud_nspk = tk.StringVar(value=cfg.get("nspk", "auto"))
         app._aud_panel = AudioPanel(app, app._aud_queue, {"add": lambda paths: add_files(app, paths)},
                                     lambda job: deliver(app, job))
-        bar = ttk.Frame(app, padding=(5, 0))
-        bar.pack(fill="x", before=app.chat_w.frame)
+        bar = app.sidebar.tool_row("Audio and voice")
         ttk.Label(bar, text="Audio model:").pack(side="left")
         m = ttk.Combobox(bar, textvariable=app.aud_model, state="readonly", width=14, values=eng.MODEL_CHOICES)
         m.pack(side="left", padx=4)

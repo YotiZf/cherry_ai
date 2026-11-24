@@ -203,8 +203,8 @@ class HermesVoice:
         self.gateway = None
         self.gateway_lock = threading.Lock()
         self.recording = False
-        self.button_text = tk.StringVar(value='Voice -> Hermes')
-        self.tasks_text = tk.StringVar(value='Hermes tasks...')
+        self.button_text = tk.StringVar(value='Cherry voice task...')
+        self.tasks_text = tk.StringVar(value='Cherry tasks...')
         self.tmp = Path(ns['DATA_DIR']) / 'hermes_voice_tmp.wav'
         self.window = None
         self.tasks = self.load_history()
@@ -250,15 +250,20 @@ class HermesVoice:
         return [t for t in self.tasks if t['status'] in ACTIVE]
 
     # ---------------------------------------------------------------- feedback
+    @staticmethod
+    def branded(text):
+        """Keep Hermes as the integration's internal name, but present it as Cherry to the user."""
+        return re.sub(r'(?i)\bHermes\b', 'Cherry', str(text))
+
     def say(self, text):
         try:
-            self.app.status.set(str(text)[:220])
+            self.app.status.set(self.branded(text)[:220])
         except Exception:
             pass
 
     def speak(self, text):
         try:
-            self.app.speaker.speak(str(text)[:300])
+            self.app.speaker.speak(self.branded(text)[:300])
         except Exception:
             pass
 
@@ -457,7 +462,8 @@ class HermesVoice:
                     '\n'.join(task['log'])), encoding='utf-8')
         except OSError:
             pass
-        self.app.show('Hermes task #%d - %s (%s)\n%s' % (tid, task['status'], task['model'], body[:1500]), 'sys')
+        self.app.show(self.branded('Hermes task #%d - %s (%s)\n%s' % (
+            tid, task['status'], task['model'], body[:1500])), 'sys')
         self.say('Hermes task #%d: %s' % (tid, task['status']))
         if task.get('speak') and self.cfg.get('speak_result', True):
             if task['status'] == 'Completed':
@@ -508,10 +514,10 @@ class HermesVoice:
             self.refresh_window()
             return
         win = self.window = tk.Toplevel(self.app)
-        win.title('Cerry - Hermes tasks (voice and typed)')
+        win.title('Cherry tasks (voice and typed)')
         win.geometry('1050x720')
         ttk.Label(win, padding=8, wraplength=1000, text=(
-            'Tasks started by voice or with /hermesnow run here. Select a task and press End task to stop it. '
+            'Tasks started by voice or with /cherrynow run here. Select a task and press End task to stop it. '
             'The list is saved. Tasks opened with /hermes stay in the Agent... window.')).pack(fill='x')
         columns = ('id', 'task', 'status', 'model', 'started', 'source')
         self.table = ttk.Treeview(win, columns=columns, show='headings', selectmode='browse', height=9)
@@ -600,7 +606,7 @@ class HermesVoice:
             return
         if self.recording:
             self.recording = False
-            self.button_text.set('Voice -> Hermes')
+            self.button_text.set('Cherry voice task...')
             try:
                 path = app.recorder.stop(self.tmp)
             except Exception as error:
@@ -623,7 +629,7 @@ class HermesVoice:
             self.say('Microphone error: %s' % str(error)[:150])
             return
         self.recording = True
-        self.button_text.set('Stop and send to Hermes')
+        self.button_text.set('Stop and send to Cherry')
         self.say('Recording your command ... click again when you have finished.')
 
     def transcribe_job(self, path, voice_cfg, get_client, local_only):
@@ -699,12 +705,11 @@ def install(ns):
                     except Exception:
                         note('could not add the buttons next to Agent...:\n' + traceback.format_exc())
                 if not placed:
-                    strip = ttk.Frame(app, padding=(6, 0))
-                    strip.pack(fill='x', before=app.inp.master)
+                    strip = app.sidebar.tool_row("Agents")
                     ttk.Button(strip, textvariable=hv.button_text, command=hv.toggle_ptt).pack(side='left', padx=2)
                     ttk.Button(strip, textvariable=hv.tasks_text, command=hv.open_window).pack(side='left', padx=2)
                     ttk.Label(strip, style='Muted.TLabel',
-                              text='Say: "Cerry, do ..." / "Hermes, ..." / "Cerry, stop Hermes".  Typed: /hermesnow ...'
+                              text='Say: "Cherry, do ..." / "Cherry, stop".  Typed: /cherrynow ...'
                               ).pack(side='left', padx=8)
                 # The existing "Stop all agents" button also ends the voice and typed tasks.
                 try:
@@ -723,7 +728,7 @@ def install(ns):
                 except Exception:
                     note('Stop all agents hook failed:\n' + traceback.format_exc())
                 note('ready: buttons %s; %d saved task(s)' % ('next to Agent...' if placed else 'in their own strip', len(hv.tasks)))
-                app.status.set('Hermes voice ready: say "Cerry, do <task>" in conversation mode (log: hermes_voice.log)')
+                app.status.set('Cherry voice ready: say "Cherry, do <task>" in conversation mode.')
             except Exception:
                 note('init failed:\n' + traceback.format_exc())
 
@@ -733,13 +738,14 @@ def install(ns):
                 hv = getattr(app, '_hv', None)
                 if hv is not None and text:
                     lowered = text.lower()
-                    if lowered == '/hermestasks':
+                    if lowered in ('/hermestasks', '/cherrytasks'):
                         app.inp.delete('1.0', 'end')
                         hv.open_window()
                         return
                     if not getattr(app, 'busy', False):
-                        if lowered.startswith('/hermesnow'):
-                            task = text[len('/hermesnow'):].strip()
+                        if lowered.startswith(('/hermesnow', '/cherrynow')):
+                            command = '/cherrynow' if lowered.startswith('/cherrynow') else '/hermesnow'
+                            task = text[len(command):].strip()
                             app.inp.delete('1.0', 'end')
                             if task:
                                 hv.run(task, 'typed')

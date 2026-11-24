@@ -1,15 +1,5 @@
-"""Cerry docs: faster document reading and searching.
-
-1. Cache: every time a workspace is opened or re-scanned, Cerry read every PDF / Word / text file again. Now the
-   extracted text of each file is remembered (keyed by path, modification time and size) in a small local database,
-   ai_workspace_data/doc_cache.sqlite, so only new or changed files are read. Delete that file to start fresh.
-2. Search index: asking a question used to compare it with EVERY text chunk of EVERY document, on the window thread.
-   Now each word points to the chunks that contain it, so only those chunks are scored. The scores and the order of
-   the results are exactly the same as before.
-Switch on:  "cerry_docs" in ai_workspace_data/plugins.json
-"""
+"""Cache extracted pages for document previews and indexing in doc_cache.sqlite."""
 import json
-import math
 import sqlite3
 import threading
 import time
@@ -66,49 +56,3 @@ def install(ns):
         return pages, status, note
 
     doc_manager.extract_pages = cached
-
-    # ------------------------------------------------------------------ 2. inverted index for search
-    Index = getattr(doc_manager, "DocumentIndex", None)
-    if Index is None:
-        return
-    original_build, original_search = Index.build, Index.search
-
-    def build(self, *args, **kwargs):
-        result = original_build(self, *args, **kwargs)
-        post = {}
-        for i, chunk in enumerate(self.chunks):
-            for term in chunk[4]:                      # chunk[4] = Counter of the words in the chunk
-                post.setdefault(term, []).append(i)
-        self._cd_post = post
-        return result
-
-    def search(self, query, k=6, excluded=()):
-        post = getattr(self, "_cd_post", None)
-        if post is None or len(post) == 0:
-            return original_search(self, query, k, excluded)
-        q = set(doc_manager.tokenize(query))
-        n = len(self.chunks)
-        if not q or n == 0:
-            return []
-        k1, b = 1.5, 0.75
-        candidates = set()
-        for term in q:
-            candidates.update(post.get(term, ()))
-        scored = []
-        for i in sorted(candidates):                   # same order as before, so equal scores keep their order
-            key, name, page, text, tf, length = self.chunks[i]
-            if key in excluded:
-                continue
-            s = 0.0
-            for term in q:
-                f = tf.get(term)
-                if f:
-                    idf = math.log(1 + (n - self.df[term] + 0.5) / (self.df[term] + 0.5))
-                    s += idf * f * (k1 + 1) / (f + k1 * (1 - b + b * length / self.avg_len))
-            if s > 0:
-                scored.append((s, key, name, page, text))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [{"score": s, "key": key, "file": name, "page": page, "text": text}
-                for s, key, name, page, text in scored[:k]]
-
-    Index.build, Index.search = build, search

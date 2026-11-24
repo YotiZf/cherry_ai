@@ -88,11 +88,7 @@ def install(ns):
         app._text_delta = start
         app._text_bases = {}
         app._text_label = tk.StringVar(value='default')
-        bar = ttk.Frame(app, padding=(6, 2))
-        try:
-            bar.pack(fill='x', before=chat.frame)
-        except (tk.TclError, AttributeError):
-            bar.pack(fill='x')
+        bar = app.sidebar.tool_row("Display")
         ttk.Label(bar, text='Text size:').pack(side='left')
         ttk.Button(bar, text='A-', width=3, command=lambda: change(app, -1)).pack(side='left', padx=2)
         ttk.Button(bar, text='A+', width=3, command=lambda: change(app, 1)).pack(side='left', padx=2)

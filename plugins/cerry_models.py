@@ -87,8 +87,8 @@ class Manager:
         self.seeded = set()
         if isinstance(data, dict) and isinstance(data.get("models"), list):
             for n, p in (data.get("providers") or {}).items():
-                if isinstance(p, dict) and p.get("url") and p.get("env"):
-                    self.providers[n] = {"url": p["url"], "env": p["env"], "local": bool(p.get("local"))}
+                if isinstance(p, dict) and p.get("url") and (p.get("env") or n == "ollama"):
+                    self.providers[n] = {"url": p["url"], "env": p.get("env", ""), "local": bool(p.get("local"))}
             self.entries = [dict(m, enabled=bool(m.get("enabled", True))) for m in data["models"]
                             if isinstance(m, dict) and m.get("label") and m.get("provider") and m.get("id")]
             self.seeded = set(data.get("seeded", []))
@@ -160,7 +160,7 @@ class Manager:
 
     def key_ok(self, provider):
         p = self.providers.get(provider)
-        return bool(p and os.getenv(p["env"]))
+        return bool(p and (os.getenv(p["env"]) if p["env"] else provider == "ollama"))
 
     # ------------------------------------------------------------ list operations
     def find(self, label):
@@ -249,7 +249,7 @@ class Manager:
             raise ValueError("Base URL must start with https:// (or http://localhost for a local server).")
         if u.scheme == "http" and u.hostname not in ("localhost", "127.0.0.1", "::1"):
             raise ValueError("Plain http is only allowed for localhost. Use https:// for online providers.")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
+        if (env or name != "ollama") and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
             raise ValueError("Key name in key.env: letters, digits and _ only (for example NVIDIA_API_KEY).")
         return name, url, env
 
@@ -389,6 +389,7 @@ class Manager:
                          ("Providers...", self.providers_dialog), ("Restore defaults", self.restore),
                          ("Close", win.destroy)):
             ttk.Button(r2, text=text, command=fn).pack(side="left", padx=3)
+        ttk.Button(r2, text="Scan keyed providers...", command=self.scan_providers).pack(side="left", padx=3)
         self.order_var = tk.BooleanVar(value=self.use_order)
         ttk.Checkbutton(win, text="Use this order for fallback (otherwise Routing's own order is kept)",
                         variable=self.order_var, command=self.order_changed).pack(anchor="w", padx=10, pady=4)
@@ -522,6 +523,60 @@ class Manager:
     def test_all(self):
         self.run_tests([i for i, e in enumerate(self.entries) if e.get("enabled", True)])
 
+    def scan_providers(self):
+        """Discover provider catalogs and make a tiny live request to every returned model.
+
+        This is opt-in because successful requests may consume provider quota or incur cost.
+        Results are diagnostic only and never change the configured model list.
+        """
+        self.reload_keys()
+        providers = [(n, dict(p)) for n, p in self.providers.items()
+                     if self.key_ok(n)]
+        if not providers:
+            self.say("No providers are ready to scan.")
+            return
+        if not messagebox.askyesno(
+                "Scan providers",
+                "Cherry will list models for every configured provider, then send a tiny test prompt "
+                "to each returned model. This may use API quota or incur small charges. Continue?",
+                parent=self.window):
+            return
+        self.say(f"Discovering and testing models from {len(providers)} provider(s)...")
+
+        def job():
+            rows = []
+            for provider, _cfg in providers:
+                try:
+                    ids = self.list_remote(provider)
+                except Exception as ex:
+                    rows.append((provider, "", "provider error: " + short(ex, 160)))
+                    continue
+                for model_id in ids:
+                    result = self.test_model({"provider": provider, "id": model_id})
+                    rows.append((provider, model_id, result))
+            return rows
+
+        def done(rows, err):
+            if err:
+                self.say("Provider scan failed: " + short(err, 160))
+                return
+            available = [(p, mid) for p, mid, result in rows if result.startswith("ok ")]
+            self.tests.update({f"{p}:{mid}": result for p, mid, result in rows})
+            report = ["Provider model scan", "Available means a live test prompt returned successfully.", ""]
+            report.extend(f"{'AVAILABLE' if result.startswith('ok ') else 'UNAVAILABLE':11} {p}: {mid or '(provider)'} — {result}"
+                          for p, mid, result in rows)
+            report += ["", f"{len(available)} available of {sum(bool(mid) for _, mid, _ in rows)} discovered model(s)."]
+            path = Path(self.ns["DATA_DIR"]) / "provider_scan.txt"
+            try:
+                path.write_text("\n".join(report) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+            self.say(f"Scan complete: {len(available)} models available. Full results: {path.name}")
+            messagebox.showinfo("Provider model scan", "\n".join(report[:24]) +
+                                ("\n...\nSee ai_workspace_data/provider_scan.txt for all results." if len(report) > 24 else ""),
+                                parent=self.window)
+        self.run_bg(job, done)
+
     # ------------------------------------------------------------ add / edit dialogs
     def add_dialog(self):
         self.entry_dialog(None)
@@ -641,7 +696,7 @@ class Manager:
         def fill_p():
             tv.delete(*tv.get_children())
             for n, p in self.providers.items():
-                tv.insert("", "end", iid=n, values=(n, p["url"], p["env"], "ok" if os.getenv(p["env"]) else "missing",
+                tv.insert("", "end", iid=n, values=(n, p["url"], p["env"], ("optional" if not p["env"] else "ok") if self.key_ok(n) else "missing",
                                                      "yes" if n in self.local_names() else ""))
 
         def cur():
@@ -724,8 +779,7 @@ class Manager:
             except (tk.TclError, ValueError):
                 continue
         if not placed:
-            strip = ttk.Frame(app, padding=(6, 0))
-            strip.pack(fill="x", before=app.inp.master)
+            strip = app.sidebar.tool_row("Workspace settings")
             ttk.Button(strip, text="Manage models...", command=self.open).pack(side="left", padx=2)
 
 

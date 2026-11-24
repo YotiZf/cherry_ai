@@ -29,6 +29,7 @@ from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog
 
 import memory_engine as me
+from turn_context import TurnContext
 
 DEFAULTS = {"mode": "ask", "budget": 2500, "model": "", "prefilter": True, "default_scope": "global",
             "cooldown_s": 20, "remember_phrase": True}
@@ -56,8 +57,16 @@ class Memory:
         self.panel = None
 
     # ------------------------------------------------------------ files
-    def file(self, scope):
-        return me.MemoryFile(self.ns["GLOBAL_MEMORY"] if scope == "global" else self.app.ws.notes_path)
+    def file(self, scope, workspace=None):
+        if scope == "global":
+            return me.MemoryFile(self.ns["GLOBAL_MEMORY"])
+        if workspace is None:
+            return me.MemoryFile(self.app.ws.notes_path)
+        root = Path(self.ns["WS_DIR"]).resolve()
+        path = (root / workspace).resolve()
+        if path.parent != root or not path.is_dir():
+            raise ValueError("The workspace for this suggestion is no longer available.")
+        return me.MemoryFile(path / "notes.md")
 
     def other(self, scope):
         return "workspace" if scope == "global" else "global"
@@ -84,13 +93,14 @@ class Memory:
             pass
 
     # ------------------------------------------------------------ saving / suggestions
-    def remember(self, text, scope):
-        added, item = self.file(scope).add(text)
+    def remember(self, text, scope, workspace=None):
+        added, item = self.file(scope, workspace).add(text)
         return added
 
     def add_pending(self, text, scope, workspace):
-        existing = [i["text"] for i in self.file("global").items()] + [i["text"] for i in self.file("workspace").items()]
-        existing += [p["text"] for p in self.pending]
+        existing = [i["text"] for i in self.file(scope, workspace).items()]
+        existing += [p["text"] for p in self.pending if p["scope"] == scope and
+                     (scope == "global" or p.get("workspace") == workspace)]
         if any(me.similar(text, e) for e in existing):
             return False
         self.pending.append({"id": uuid.uuid4().hex[:8], "text": text, "scope": scope, "workspace": workspace,
@@ -99,37 +109,42 @@ class Memory:
         return True
 
     # ------------------------------------------------------------ automatic suggestions
-    def after_reply(self, version, force=False):
+    def after_reply(self, version, turn, force=False):
         mode = self.cfg.get("mode", "ask")
         if (mode == "off" and not force) or self.working or not version:
             return
         now = time.time()
         if not force and now - self.last_run < float(self.cfg.get("cooldown_s", 20)):
             return
-        msgs = self.app.chat["messages"] if self.app.chat else []
-        user = next((m["content"] for m in reversed(msgs) if m.get("role") == "user"), "")
+        if not (turn.global_memory or turn.workspace_memory):
+            return
+        user = turn.user_text
         if not user or user.startswith("/"):
             return
         if not force and self.cfg.get("prefilter", True) and not me.looks_memorable(user):
             return
         self.last_run = now
         label = self.cfg.get("model") or ""
-        model = next((m for m in self.ns["MODELS"] if m["label"] == label), None) or self.app.selected_model()
-        g_items = [i["text"] for i in self.file("global").items()]
-        w_items = [i["text"] for i in self.file("workspace").items()]
-        prompt = me.extraction_prompt(self.app.ws.name, g_items, w_items, user, version.get("content", ""))
+        model = next((m for m in self.ns["MODELS"] if m["label"] == label), None) or turn.model
+        ws_name = turn.workspace.name
+        g_items = [i["text"] for i in self.file("global").items()] if turn.global_memory else []
+        w_items = [i["text"] for i in self.file("workspace", ws_name).items()] if turn.workspace_memory else []
+        scopes = {scope for scope, enabled in (("global", turn.global_memory), ("workspace", turn.workspace_memory))
+                  if enabled}
+        prompt = me.extraction_prompt(ws_name, g_items, w_items, user, version.get("content", ""))
         self.working = True
-        threading.Thread(target=self._extract, args=(model, prompt, g_items + w_items + [p["text"] for p in self.pending],
-                                                      self.app.ws.name), daemon=True).start()
+        threading.Thread(target=self._extract, args=(model, prompt, g_items + w_items, ws_name,
+                                                      turn.policy, scopes), daemon=True).start()
         self.app.after(700, self.poll)
 
-    def _extract(self, model, prompt, existing, ws_name):
+    def _extract(self, model, prompt, existing, ws_name, policy, scopes):
         routing, streaming = self.ns["routing"], self.ns["streaming"]
         try:
-            order, _ = routing.build_order(self.ns["MODELS"], model, self.app.policy)
+            order, _ = routing.build_order(self.ns["MODELS"], model, policy)
             msgs = [{"role": "system", "content": me.EXTRACT_SYSTEM}, {"role": "user", "content": prompt}]
-            res = streaming.run_chat(order, msgs, self.ns["get_client"], streaming.CancelToken(), self.app.policy, None, None)
-            self.q.put(("items", ws_name, me.parse_extraction(res["answer"], existing)))
+            res = streaming.run_chat(order, msgs, self.ns["get_client"], streaming.CancelToken(), policy, None, None)
+            items = me.parse_extraction(res["answer"], existing)
+            self.q.put(("items", ws_name, [item for item in items if item["scope"] in scopes]))
         except Exception as e:
             self.q.put(("error", ws_name, str(e)[:120]))
 
@@ -427,7 +442,14 @@ class Panel:
     def sug_keep(self, scope=None):
         p = self.sug_selected()
         if p:
-            self.m.remember(p["text"], scope or p["scope"])
+            try:
+                destination = scope or p["scope"]
+                if destination == "workspace" and not p.get("workspace"):
+                    raise ValueError("This suggestion has no saved workspace.")
+                self.m.remember(p["text"], destination, p.get("workspace"))
+            except (ValueError, OSError) as exc:
+                messagebox.showinfo("Memory", str(exc), parent=self.win)
+                return
             self.m.pending.remove(p)
             self.m.save_pending()
             self.refresh(force=True)
@@ -472,7 +494,10 @@ class Panel:
             messagebox.showinfo("Memory", "There is no reply to look at yet.", parent=self.win)
             return
         self.m.say("Looking for things worth remembering ...")
-        self.m.after_reply({"content": reply.get("content", "")}, force=True)
+        messages = self.app.chat["messages"]
+        index = next(i for i, message in enumerate(messages) if message is reply)
+        user = next((m["content"] for m in reversed(messages[:index]) if m.get("role") == "user"), "")
+        self.m.after_reply(reply, TurnContext.capture(self.app, user), force=True)
 
 
 def install(ns):
@@ -488,8 +513,7 @@ def install(ns):
         original_init(app, *a, **k)
         app._mem = Memory(app, ns)
         app._mem_mode_var = tk.StringVar(value=MODE_NAMES.get(app._mem.cfg.get("mode", "ask"), "Ask me"))
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Memory")
         ttk.Button(strip, text="Memory...", command=app._mem.open).pack(side="left", padx=2)
         ttk.Label(strip, text="Auto memory:").pack(side="left", padx=(10, 3))
         box = ttk.Combobox(strip, textvariable=app._mem_mode_var, values=list(MODE_LABELS), state="readonly", width=18)
@@ -500,7 +524,6 @@ def install(ns):
             app._mem.save_cfg()
             app.status.set(f"Auto memory: {app._mem_mode_var.get()}")
         box.bind("<<ComboboxSelected>>", changed)
-        ttk.Label(strip, text="or say: remember that ...   /memory   /forget <words>", style="Muted.TLabel").pack(side="left", padx=8)
 
     def send(app):
         text = app.inp.get("1.0", "end").strip()
@@ -514,7 +537,8 @@ def install(ns):
         def finish(app, cid, target, version):
             original_finish(app, cid, target, version)
             try:
-                app._mem.after_reply(version)
+                if app.turn.chat_id == cid:
+                    app._mem.after_reply(version, app.turn)
             except Exception as e:
                 app.status.set(f"Memory check failed: {e}"[:150])
         App.finish_generation = finish

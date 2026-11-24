@@ -1,6 +1,6 @@
 """check_local_llm.py - finds out why Cerry cannot reach your local model.
 
-Run in PowerShell from your Cerry folder (AnythingLLM must be open):
+Run in PowerShell from your Cerry folder (Ollama must be running):
     python check_local_llm.py
 Optional: python check_local_llm.py --base http://127.0.0.1:11434/v1 --model NAME --key KEY
 
@@ -11,27 +11,15 @@ Nothing is changed and no key is printed.
 """
 import argparse
 import json
-import os
 import socket
 import sys
 import time
-from pathlib import Path
 
 import httpx
 
-PORTS = [(11434, "Ollama"), (1234, "LM Studio"), (3001, "AnythingLLM developer API"),
+PORTS = [(11434, "Ollama"), (1234, "LM Studio"),
          (8000, "Lemonade or other"), (8080, "llama.cpp server"), (5000, "other"), (13305, "other")]
 PATHS = ["/v1", "/api/v1", "/api/v1/openai"]
-
-
-def load_env():
-    for name in ("key.env", ".env"):
-        p = Path(__file__).resolve().parent.parent / name
-        if p.is_file():
-            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-                if "=" in line and not line.strip().startswith("#"):
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip().strip('"\''))
 
 
 def listening(port):
@@ -75,9 +63,7 @@ def scan(key):
                 print("      %s -> needs an API key (%s)" % (base, why))
     if not found:
         print("\n  No local OpenAI-style server answered.")
-        print("  AnythingLLM's built-in engine is private to AnythingLLM, so Cerry cannot use it directly.")
-        print("  Fix: run the model in Ollama or LM Studio (or use AnythingLLM's developer API, port 3001,")
-        print("  with a key from Settings > Developer API) and put that address in Cerry's local provider.")
+        print("  Start Ollama and check http://127.0.0.1:11434/v1/models.")
     return found
 
 
@@ -125,8 +111,7 @@ def main():
     ap.add_argument("--model")
     ap.add_argument("--key", default="")
     a = ap.parse_args()
-    load_env()
-    key = a.key or os.getenv("ANYTHINGLLM_API_KEY", "")
+    key = a.key
     if a.base and a.model:
         chat(a.base.rstrip("/"), a.model, key)
         return

@@ -22,7 +22,7 @@ def install(ns):
         owner = getattr(index, '_unlink_owner', None)
         if owner is not None and not owner.cfg.get('folder'):
             # Guard against a pre-unlink background scan completing with its old sources.
-            stale = {c[0] for c in index.chunks if c[0].startswith('linked/')}
+            stale = {r.key for r in index.records if r.label == 'linked'}
             return set(excluded) | stale
         return excluded
 

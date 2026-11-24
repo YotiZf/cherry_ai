@@ -293,6 +293,8 @@ def install(ns):
     def init(app, *a, **k):
         original_init(app, *a, **k)
         app._style = Style(app, ns)
+        row = app.sidebar.tool_row("Response settings")
+        ttk.Button(row, text="Writing style...", command=app._style.open).pack()
 
     def send(app):
         text = app.inp.get("1.0", "end").strip()
@@ -326,15 +328,15 @@ def install(ns):
     if mod is not None and hasattr(mod, "Hunter"):
         original_tailor = mod.Hunter.tailor
 
-        def tailor(self, rec, desc, a, profile, cv_text, folder, lang):
+        def tailor(self, rec, desc, a, profile, cv_text, folder, lang, letter_only=False):
             style = getattr(self.app, "_style", None)
             if style is None or not style.cfg.get("use_in_jobs") or not style.cfg.get("folder"):
-                return original_tailor(self, rec, desc, a, profile, cv_text, folder, lang)
+                return original_tailor(self, rec, desc, a, profile, cv_text, folder, lang, letter_only=letter_only)
             try:
                 cv_block, letter_block = style.blocks_for(lang, desc, lambda s, u: self.llm(s, u), self.log)
             except Exception as e:                       # a problem with the folder must never stop the job search
                 self.log(f"  writing style skipped: {str(e)[:120]}")
-                return original_tailor(self, rec, desc, a, profile, cv_text, folder, lang)
+                return original_tailor(self, rec, desc, a, profile, cv_text, folder, lang, letter_only=letter_only)
             self.log("  writing the documents in your own style ...")
             saved = (mod.CV_SYSTEM, mod.LETTER_SYSTEM)
             tuner = ns.get("_tuner")
@@ -342,7 +344,7 @@ def install(ns):
             if tuner is not None:
                 tuner.context.kind = "writing"
             try:
-                return original_tailor(self, rec, desc, a, profile, cv_text, folder, lang)
+                return original_tailor(self, rec, desc, a, profile, cv_text, folder, lang, letter_only=letter_only)
             finally:
                 mod.CV_SYSTEM, mod.LETTER_SYSTEM = saved
                 if tuner is not None:

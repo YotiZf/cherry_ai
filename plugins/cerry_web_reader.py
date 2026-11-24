@@ -20,13 +20,11 @@ Enable: "cerry_web_reader" in plugins.json. Optional: ai_workspace_data/web_read
   {"enabled": true, "max_links": 4, "refresh_minutes": 60}
 """
 import base64
-import ipaddress
 import json
 import math
 import os
 import queue
 import re
-import socket
 import threading
 import time
 import traceback
@@ -37,6 +35,8 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit, quote
 
 import httpx
+
+from core.public_web import host_is_public, read_prefix
 
 ORDER = 70
 URL_RE = re.compile(r'https?://[^\s<>"\']+', re.I)
@@ -115,14 +115,6 @@ def html_to_text(html):
     return parser.title.strip(), text
 
 
-def host_is_public(host):
-    try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    except OSError:
-        return False
-    return bool(infos) and all(ipaddress.ip_address(i[4][0].split('%')[0]).is_global for i in infos)
-
-
 def check_url(url):
     parts = urlsplit(url)
     if parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password:
@@ -149,12 +141,8 @@ def fetch_page(url, limit=2_000_000):
                 ctype = r.headers.get('content-type', '').lower()
                 if ctype and not any(k in ctype for k in ('html', 'text', 'json', 'xml')):
                     raise RuntimeError('not a text page (%s)' % ctype.split(';')[0])
-                data = b''
-                for chunk in r.iter_bytes():
-                    data += chunk
-                    if len(data) > limit:
-                        break
-                return current, ctype, data[:limit].decode(r.encoding or 'utf-8', errors='replace')
+                text = read_prefix(r, limit).decode(r.encoding or 'utf-8', errors='replace')
+                return current, ctype, text
     raise RuntimeError('too many redirects')
 
 

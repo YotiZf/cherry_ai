@@ -169,9 +169,7 @@ def install(ns):
         holder['app'] = app
         enabled = tk.BooleanVar(value=bool(cfg['enabled']))
         limit = tk.StringVar(value=str(cfg['output_limit']))
-        row = ttk.Frame(app, padding=(6, 2))
-        row._dock_skip = True
-        row.pack(fill='x', before=app.inp.master)
+        row = app.sidebar.tool_row("Token control")
 
         def save():
             with lock:
@@ -227,9 +225,11 @@ def install(ns):
                 win.destroy()
             ttk.Button(frame, text='Save', command=store).pack(anchor='e')
         ttk.Checkbutton(row, text='Token control', variable=enabled, command=apply).pack(side='left')
-        ttk.Label(row, text='Max output per request:').pack(side='left', padx=(8, 3))
-        box = ttk.Combobox(row, textvariable=limit, width=8, values=['1024', '2048', '4096', '8192', '16384'])
-        box.pack(side='left')
+        limits = ttk.Frame(row)
+        limits.pack(fill='x')
+        box = ttk.Combobox(limits, textvariable=limit, width=7, values=['1024', '2048', '4096', '8192', '16384'])
+        box.pack(side='right', padx=2)
+        ttk.Label(limits, text='Output limit').pack(side='left')
         for event in ('<<ComboboxSelected>>', '<Return>', '<FocusOut>'):
             box.bind(event, apply)
         ttk.Button(row, text='Token settings...', command=settings).pack(side='left', padx=8)

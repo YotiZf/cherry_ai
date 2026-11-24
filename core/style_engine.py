@@ -13,7 +13,13 @@ import hashlib
 import json
 import re
 import time
+from itertools import islice
 from pathlib import Path
+
+if __package__:
+    from .file_scan import iter_files
+else:
+    from file_scan import iter_files
 
 SAMPLE_EXT = {".txt", ".md", ".docx", ".pdf", ".tex", ".rtf"}
 MAX_FILES = 60
@@ -74,14 +80,8 @@ def classify(name, text):
 
 
 def candidate_files(folder):
-    folder = Path(folder)
-    if not folder.is_dir():
-        return []
-    out = []
-    for p in sorted(folder.rglob("*")):
-        if p.is_file() and p.suffix.lower() in SAMPLE_EXT and not any(part.startswith(".") for part in p.relative_to(folder).parts):
-            out.append(p)
-    return out[:MAX_FILES]
+    visible = iter_files(folder, lambda name: name.startswith("."))
+    return list(islice((path for path in visible if path.suffix.lower() in SAMPLE_EXT), MAX_FILES))
 
 
 def fingerprint(folder):

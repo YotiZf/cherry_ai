@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import ttk, scrolledtext
 
+if __package__:
+    from .file_scan import iter_files
+else:
+    from file_scan import iter_files
+
 TEXT_EXT = {".txt", ".md", ".py", ".r", ".csv", ".tsv", ".json", ".yaml", ".yml",
             ".log", ".tex", ".html", ".ini", ".cfg", ".sh", ".ipynb"}
 SUPPORTED = TEXT_EXT | {".pdf", ".docx"}
@@ -98,25 +103,50 @@ class ScanRecord:
 
 
 class DocumentIndex:
-    def __init__(self):
-        self.records = []
-        self.chunks = []      # (key, filename, page, text, Counter, length)
-        self.df = Counter()
+    def __init__(self, memory=None, sources=()):
+        self.memory = memory
+        self.records = memory.records(sources) if memory else []
+        self._chunks = None if memory else []
+        self._postings = {}
         self.avg_len = 1.0
+
+    @property
+    def df(self):
+        """Document frequencies for consumers of the in-memory index."""
+        return Counter({term: len(ids) for term, ids in self._postings.items()})
+
+    @property
+    def chunks(self):
+        if self._chunks is None:
+            keys = {r.key for r in self.records}
+            with self.memory.connect() as db:
+                chunks = []
+                for key, name, page, text in db.execute("SELECT key,name,page,text FROM passages ORDER BY rowid"):
+                    if key in keys:
+                        words = tokenize(text)
+                        chunks.append((key, name, page, text, Counter(words), len(words)))
+                self._chunks = chunks
+        return self._chunks
+
+    def full_text(self, path):
+        if self.memory:
+            record = next(r for r in self.records if r.path == Path(path))
+            _, pages = self.memory.document(record.key)
+            return "\n\n".join((f"Page {page}\n" if page else "") + text for page,text in pages)
+        return read_full_text(path)
 
     def build(self, sources, chunk_words=220, overlap=40):
         """sources: list of (label, folder). Hidden files/folders (e.g. .env) are never read."""
+        if self.memory:
+            self.memory.refresh(sources, extract_pages, chunk_words, overlap, SKIP_DIRS, MAX_FILE_MB)
+            self.records = self.memory.records(sources)
+            self._chunks = None
+            return
         records, chunks = [], []
         for label, folder in sources:
             folder = Path(folder)
-            if not folder.exists():
-                continue
-            for path in sorted(folder.rglob("*")):
-                if not path.is_file():
-                    continue
+            for path in iter_files(folder, lambda name: name in SKIP_DIRS or name.startswith(".")):
                 rel = path.relative_to(folder)
-                if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
-                    continue
                 pages, status, note = extract_pages(path)
                 try:
                     size = path.stat().st_size
@@ -137,31 +167,41 @@ class DocumentIndex:
                         if i + chunk_words >= len(words):
                             break
                 records.append(rec)
-        df = Counter()
-        for c in chunks:
-            for t in c[4]:
-                df[t] += 1
+        postings = {}
+        for index, chunk in enumerate(chunks):
+            for term in chunk[4]:
+                postings.setdefault(term, []).append(index)
         avg = (sum(c[5] for c in chunks) / len(chunks)) if chunks else 1.0
-        self.records, self.chunks, self.df, self.avg_len = records, chunks, df, avg
+        self.records, self._chunks, self._postings, self.avg_len = records, chunks, postings, avg
 
     def active_files(self, excluded=()):
         return [r.rel for r in self.records if r.status == "ok" and r.key not in excluded]
 
     def search(self, query, k=6, excluded=()):
+        if self.memory:
+            return self.memory.search(query, self.records, k, excluded)
         q = set(tokenize(query))
-        n = len(self.chunks)
+        chunks = self.chunks
+        n = len(chunks)
         if not q or n == 0:
             return []
         k1, b = 1.5, 0.75
+        candidates = set()
+        weights = {}
+        for term in q:
+            ids = self._postings.get(term, ())
+            if ids:
+                candidates.update(ids)
+                weights[term] = math.log(1 + (n - len(ids) + 0.5) / (len(ids) + 0.5))
         scored = []
-        for key, name, page, text, tf, length in self.chunks:
+        for index in sorted(candidates):
+            key, name, page, text, tf, length = chunks[index]
             if key in excluded:
                 continue
             s = 0.0
-            for t in q:
+            for t, idf in weights.items():
                 f = tf.get(t)
                 if f:
-                    idf = math.log(1 + (n - self.df[t] + 0.5) / (self.df[t] + 0.5))
                     s += idf * f * (k1 + 1) / (f + k1 * (1 - b + b * length / self.avg_len))
             if s > 0:
                 scored.append((s, key, name, page, text))
@@ -173,7 +213,7 @@ class DocumentIndex:
 class DocumentPanel(tk.Toplevel):
     """Table of all files: tick/untick to include them, see scan problems, preview text."""
 
-    def __init__(self, parent, get_state, set_excluded, rescan, open_docs):
+    def __init__(self, parent, get_state, set_excluded, rescan, open_docs, review=None, ask=None):
         super().__init__(parent)
         self.title("Documents")
         self.geometry("900x460")
@@ -201,6 +241,18 @@ class DocumentPanel(tk.Toplevel):
         ttk.Button(bar, text="Select all", command=self.select_all).pack(side="left", padx=2)
         ttk.Button(bar, text="Select none", command=self.select_none).pack(side="left", padx=2)
         ttk.Button(bar, text="Preview text", command=self.preview).pack(side="left", padx=2)
+        def selected_action(action):
+            def invoke():
+                sel = self.tree.selection()
+                if sel:
+                    action(sel[0])
+                else:
+                    self.summary.set("Select a document first.")
+            return invoke
+        if ask:
+            ttk.Button(bar, text="Ask a question", command=selected_action(ask)).pack(side="left", padx=2)
+        if review:
+            ttk.Button(bar, text="Review whole document", command=selected_action(review)).pack(side="left", padx=2)
         ttk.Button(bar, text="Re-scan", command=self.rescan).pack(side="left", padx=2)
         ttk.Button(bar, text="Open folder", command=self.open_docs).pack(side="left", padx=2)
         ttk.Label(bar, text="Click the box to include/exclude a file. Double-click previews it.",
@@ -257,5 +309,9 @@ class DocumentPanel(tk.Toplevel):
         win.geometry("720x480")
         box = scrolledtext.ScrolledText(win, wrap="word")
         box.pack(fill="both", expand=True)
-        box.insert("1.0", preview_text(rec.path))
+        try:
+            text = self.get_state()[0].full_text(rec.path) if rec.status == "ok" else rec.note
+        except (ValueError, OSError, StopIteration) as exc:
+            text = str(exc)
+        box.insert("1.0", text[:8000] + ("\n[Preview truncated]" if len(text)>8000 else ""))
         box.config(state="disabled")

@@ -14,8 +14,8 @@ and calls install(ns) of every plugin module in that list.
   not installed twice.  Two plugins that picked the SAME mark used to block each other silently (cerry_models and
   cerry_contextmenu: the right-click menu and the input-box resizing disappeared).  The loader now clears a mark
   that another plugin has set before it installs the next plugin, and says so in plugins.log.
-* After all plugins have started, cerry_dock.py gathers their toolbar rows into one tabbed panel
-  (switch off with {"mode": "flat"} in ai_workspace_data/dock.json).
+* The sidebar lays out built-in tool groups after plugins have finished adding controls.
+  cerry_dock.py handles older plugins that still create independent toolbar rows.
 """
 import importlib
 import json
@@ -145,6 +145,7 @@ def import_dock():
 
 def install(ns):
     App = ns["App"]
+    App.defer_sidebar_layout = True
     if App in _INSTALLED:
         return
     _INSTALLED.add(App)
@@ -165,6 +166,7 @@ def install(ns):
 
     def init(app, *args, **kwargs):
         original_init(app, *args, **kwargs)
+        app.sidebar.finish_tools()
         if dock is not None:
             try:
                 state["rows"] = dock.arrange(app, data_dir / "dock.json")

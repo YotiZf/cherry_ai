@@ -353,8 +353,7 @@ def install(ns):
 
     def init(app, *a, **k):
         orig_init(app, *a, **k)
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Files and images")
 
         def ask():
             prompt = simpledialog.askstring("Make a picture", "What should Cerry draw?", parent=app)

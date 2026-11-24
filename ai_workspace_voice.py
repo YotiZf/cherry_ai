@@ -7,7 +7,7 @@ Layout of the program
   config/                 safe example settings copied into ai_workspace_data/ on first setup
 Keys live in key.env next to this file.  Everything the program saves is in ai_workspace_data/.
 """
-import copy, os, re, sys, json, uuid, shutil, subprocess, threading, queue, datetime
+import copy, os, re, sys, json, uuid, shutil, subprocess, threading, queue, datetime, logging
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox, scrolledtext
@@ -24,9 +24,14 @@ CORE_DIR = APP_DIR / "core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
-import routing, streaming, evidence, voice
+import routing, streaming, evidence, voice, realtime_voice
 import cerri_extensions
+from workspace_sidebar import WorkspaceSidebar
+from temporary_chat import TemporaryChat
+from turn_context import TurnContext
+import backup_tools
 from doc_manager import DocumentIndex, DocumentPanel, read_full_text
+import chat_format
 import workspace
 from workspace import Workspace, list_workspaces, write_atomic
 
@@ -50,14 +55,14 @@ workspace.configure(WS_DIR)
 THEMES = {
     "light": {
         "bg": "#f7f7f8", "panel": "#ffffff", "chat_bg": "#ffffff", "fg": "#202123", "muted": "#777a80",
-        "input_bg": "#ffffff", "user_bubble": "#2563eb", "code_bg": "#f5f6f8", "accent": "#10a37f",
+        "input_bg": "#ffffff", "user_bubble": "#eaecef", "code_bg": "#f5f6f8", "accent": "#10a37f",
         "btn": "#f1f2f4", "btn_active": "#e7e8eb", "border": "#dedfe3",
-        "select": "#d9e7ff", "user": "#ffffff", "sys": "#777a80", "link": "#2563eb",
+        "select": "#d9e7ff", "user": "#202123", "sys": "#777a80", "link": "#2563eb",
         "think": "#666b73", "refs": "#28734a",
     },
     "dark": {
         "bg": "#17181b", "panel": "#202124", "chat_bg": "#202124", "fg": "#e7e8ea", "muted": "#a0a3aa",
-        "input_bg": "#25272b", "user_bubble": "#2563eb", "code_bg": "#292b30", "accent": "#10a37f",
+        "input_bg": "#25272b", "user_bubble": "#34363a", "code_bg": "#292b30", "accent": "#10a37f",
         "btn": "#2b2d32", "btn_active": "#373a40", "border": "#3a3c42",
         "select": "#3b4e69", "user": "#ffffff", "sys": "#a0a3aa", "link": "#8ab4f8",
         "think": "#b0b3b9", "refs": "#8fd0a8",
@@ -69,6 +74,7 @@ def load_settings():
     try:
         return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except Exception:
+        logging.getLogger(__name__).exception("Could not read settings file %s", SETTINGS_PATH)
         return {}
 
 
@@ -132,6 +138,8 @@ def _branch_chat(chat, upto_index, new_id):
             "messages": copy.deepcopy(chat["messages"][:upto_index + 1])}
 for p in (DATA_DIR, WS_DIR):
     p.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(filename=DATA_DIR / "cherry.log", level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s", encoding="utf-8")
 GLOBAL_MEMORY.touch(exist_ok=True)
 
 # ----------------------------------------------------------------------
@@ -141,7 +149,7 @@ PROVIDERS = {
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/", "GEMINI_API_KEY"),
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
-    "anythingllm": ("http://localhost:3001/api/v1/openai", "ANYTHINGLLM_API_KEY"),
+    "ollama": ("http://127.0.0.1:11434/v1", ""),
 }
 
 MODELS = [
@@ -152,14 +160,8 @@ MODELS = [
     {"label": "Gemini 3.5 Flash",          "provider": "gemini",     "id": "gemini-3.5-flash"},
     {"label": "Groq Qwen 3.8-27b",         "provider": "groq",       "id": "qwen/qwen3.8-27b"},
     {"label": "OpenRouter Nemotron 3.5 Super VL", "provider": "openrouter", "id": "nvidia/nemotron-3.5-super-vl:free"},
-    {"label": "Local DeepSeek-R1 8B (AnythingLLM)", "provider": "anythingllm", "id": "general"},
-    #{"label": "Local Gemma 4 12B (AnythingLLM)",    "provider": "anythingllm", "id": "Gemma-4-12B-it-GGUF"},
-    #{"label": "Local DeepSeek-R1 8B (AnythingLLM)", "provider": "anythingllm", "id": "DeepSeek-R1-0528-Qwen3-8B"},
-   # {"label": "Local Qwen (AnythingLLM)",           "provider": "anythingllm", "id": "general"},
+    {"label": "Local Gemma 4 (Ollama)", "provider": "ollama", "id": "gemma4:latest"},
     {"label": "Groq GPT-OSS 120B",         "provider": "groq",       "id": "openai/gpt-oss-120b"},
-    {"label": "Local Gemma-4-12B-it (AnythingLLM)", "provider": "anythingllm", "id": "Gemma-4-12B-it"},
-    {"label": "Local Qwen3.5-9B (AnythingLLM)", "provider": "anythingllm", "id": "Qwen3.5-9B"},
-    {"label": "Local DeepSeek-R1-0528-Qwen3-8B (AnythingLLM)", "provider": "anythingllm", "id": "DeepSeek-R1-0528-Qwen3-8B"},
 
 ]
 
@@ -168,6 +170,8 @@ BASE_SYSTEM = (
     f"If asked which language model runs you, say it depends on the model selected in the app "
     f"and do not guess. "
     "When document excerpts are provided, use them when relevant, cite them as [D1], [D2], ... and name the file. "
+    r"In written answers use \(…\) for inline mathematics and \[…\] for display equations. "
+    "Put reusable code, commands, or a requested copy-ready text in fenced Markdown blocks. "
     "Reply in English by default. If the user writes or speaks German, or asks for German, reply in German. "
 )
 
@@ -202,12 +206,14 @@ def get_client(provider):
             if provider not in PROVIDERS:
                 raise routing.ConfigError(f"Unknown provider '{provider}'. Add it under Manage models > Providers.")
             base_url, env = PROVIDERS[provider]
-            key = (os.getenv(env) or "").strip()
+            key = (os.getenv(env) or "").strip() if env else ""
+            if provider == "ollama" and not env:
+                key = "ollama"  # The SDK requires a value. Local Ollama ignores it.
             if not key:
                 raise routing.ConfigError(f"{env} is missing in your key.env file")
             from openai import OpenAI
             client = _clients[provider] = OpenAI(api_key=key, base_url=base_url,
-                                                 timeout=600 if provider == "anythingllm" else 120)
+                                                 timeout=600 if provider == "ollama" else 120)
     return client
 
 
@@ -241,6 +247,8 @@ def web_search(query, n=5):
 # APP
 # ----------------------------------------------------------------------
 class App(tk.Tk):
+    defer_sidebar_layout = False
+
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} - AI Workspace")
@@ -256,8 +264,15 @@ class App(tk.Tk):
         self.recorder = voice.Recorder()
         self.convo = None
         self.convo_active = False
+        self.quick_voice_active = False
+        self._quick_voice_restore = None
+        self.realtime_voice = None
+        self._rt_user_text = ""
+        self._rt_assistant_text = ""
+        self._rt_last_error = ""
         self.convo_stream_id = None
         self.convo_pending = None
+        self.typed_followup = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         names = list_workspaces()
         last = self.settings.get("last_workspace")
@@ -273,22 +288,30 @@ class App(tk.Tk):
         self.doc_panel = None
         self.flipped = set()
         self._links, self._bound = {}, set()
-        self.chat_label_var = tk.StringVar(value="Chat:")
-        self.doc_focus = tk.IntVar(value=max(0, min(100, int(self.settings.get("document_focus", 100)))))
+        self.chat_label_var = tk.StringVar(value="Chats")
+        # Preserve the retrieval preference saved by versions with the focus slider.
+        self.document_focus = max(0, min(100, int(self.settings.get("document_focus", 100))))
         self.build_ui()
         self.apply_theme(self.theme_name)
         self.load_ws(self.ws.name)
+        if not self.defer_sidebar_layout:
+            self.sidebar.finish_tools()
         self.after(100, self.poll)
 
     # ---------------- UI ----------------
     def build_ui(self):
-        top = ttk.Frame(self, padding=(16, 14, 16, 6))
+        self.sidebar = WorkspaceSidebar(self, self.settings, save_settings)
+        controls = self.sidebar.navigation
+        ttk.Label(controls, text=APP_NAME, font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        top = ttk.Frame(controls, padding=6)
+        self.sidebar.navigation_grid = top
         top.pack(fill="x")
 
-        ttk.Label(top, text="Model:").grid(row=0, column=0, sticky="w")
+        header = ttk.Frame(self)
+        header.pack(fill="x")
+        self.header_actions = ttk.Frame(header)
+        self.header_actions.pack(side="right", anchor="ne", padx=(0, 10), pady=3)
         self.model_var = tk.StringVar(value=MODELS[0]["label"])
-        ttk.Combobox(top, textvariable=self.model_var, state="readonly", width=36,
-                     values=[m["label"] for m in MODELS]).grid(row=0, column=1, padx=4)
         self.fallback_var = tk.BooleanVar(value=self.policy.allow_fallback)
         self.local_var = tk.BooleanVar(value=self.policy.local_only)
         ttk.Checkbutton(top, text="Auto-fallback", variable=self.fallback_var,
@@ -298,12 +321,13 @@ class App(tk.Tk):
         ttk.Button(top, text="Routing...", command=self.open_routing).grid(row=0, column=4, padx=2)
         ttk.Button(top, text="List models", command=self.list_models).grid(row=0, column=5, padx=2)
         self.dark_var = tk.BooleanVar(value=(self.theme_name == "dark"))
-        ttk.Checkbutton(top, text="Dark mode", variable=self.dark_var,
-                            command=self.on_theme_toggle).grid(row=0, column=6, padx=8)
+        appearance = self.sidebar.tool_row("Display")
+        ttk.Checkbutton(appearance, text="Dark mode", variable=self.dark_var,
+                        command=self.on_theme_toggle).pack()
 
-        ttk.Label(top, text="Workspace:").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Label(top, text="Workspace", font=("Segoe UI", 12, "bold")).grid(row=1, column=0, sticky="w", pady=3)
         self.ws_var = tk.StringVar()
-        self.ws_box = ttk.Combobox(top, textvariable=self.ws_var, state="readonly", width=36)
+        self.ws_box = ttk.Combobox(top, textvariable=self.ws_var, state="readonly", width=36, font=("Segoe UI", 13))
         self.ws_box.grid(row=1, column=1, padx=4)
         self.ws_box.bind("<<ComboboxSelected>>", self.on_ws_selected)
         ttk.Button(top, text="New", command=self.new_ws).grid(row=1, column=2, padx=2)
@@ -313,48 +337,71 @@ class App(tk.Tk):
         ttk.Button(top, text="Link extra folder", command=self.link_folder).grid(row=1, column=5, padx=2)
         ttk.Button(top, text="Re-scan", command=self.reindex_async).grid(row=1, column=6, padx=2)
 
-        ttk.Label(top, textvariable=self.chat_label_var).grid(row=2, column=0, sticky="w", pady=3)
-        self.chat_var = tk.StringVar()
-        self.chat_box = ttk.Combobox(top, textvariable=self.chat_var, state="readonly", width=36)
-        self.chat_box.grid(row=2, column=1, padx=4)
-        self.chat_box.bind("<<ComboboxSelected>>", self.on_chat_selected)
-        ttk.Button(top, text="New chat", command=self.new_chat).grid(row=2, column=2, padx=2)
-        ttk.Button(top, text="Rename", command=self.rename_chat).grid(row=2, column=3, padx=2)
-        ttk.Button(top, text="Delete", command=self.delete_chat).grid(row=2, column=4, padx=2)
+        ttk.Label(top, textvariable=self.chat_label_var, font=("Segoe UI", 12, "bold")).grid(row=2, column=0, sticky="w", pady=3)
+        history = ttk.Frame(top)
+        history.grid(row=2, column=1, sticky="ew")
+        self.chat_titles = tk.StringVar(value=())
+        self.chat_box = tk.Listbox(history, listvariable=self.chat_titles, height=4, width=1,
+                                   activestyle="none", exportselection=False, borderwidth=0,
+                                   highlightthickness=0, font=("Segoe UI", 13))
+        history_scroll = ttk.Scrollbar(history, command=self.chat_box.yview)
+        history_scroll.pack(side="right", fill="y")
+        self.chat_box.configure(yscrollcommand=history_scroll.set)
+        self.chat_box.pack(fill="both", expand=True)
+        self.chat_box.bind("<<ListboxSelect>>", self.on_chat_selected)
+        ttk.Button(top, text="＋ New chat", style="Sidebar.TButton", command=self.new_chat).grid(row=2, column=2, padx=2)
+        ttk.Button(top, text="Temporary chat", style="Sidebar.TButton",
+                   command=lambda: TemporaryChat(self, MODELS, get_client)).grid(row=2, column=3, padx=2)
+        ttk.Button(top, text="Rename", command=self.rename_chat).grid(row=2, column=4, padx=2)
+        ttk.Button(top, text="Delete", command=self.delete_chat).grid(row=2, column=5, padx=2)
 
-        mem = ttk.Frame(self, padding=(16, 4, 16, 2))
-        mem.pack(fill="x")
-        self.use_global = tk.BooleanVar(value=True)
+        mem = self.sidebar.tool_row("Memory")
+        self.memory_scope_var = tk.StringVar(value=self.settings.get("memory_scope", "Both"))
+        if self.memory_scope_var.get() not in ("None", "Both", "Workspace only"):
+            self.memory_scope_var.set("Both")
+        self.use_global = tk.BooleanVar()
+        self.use_workspace_memory = tk.BooleanVar()
         self.use_ws = tk.BooleanVar(value=True)
-        ttk.Checkbutton(mem, text="Global memory", variable=self.use_global).pack(side="left")
-        ttk.Checkbutton(mem, text="Workspace memory (notes + documents)",
-                        variable=self.use_ws).pack(side="left", padx=8)
+        ttk.Label(mem, text="Memory scope").pack(side="left")
+        self.memory_scope_box = ttk.Combobox(
+            mem, textvariable=self.memory_scope_var, state="readonly", width=16,
+            values=["None", "Both", "Workspace only"])
+        self.memory_scope_box.pack(side="left", padx=(4, 10))
+        self.memory_scope_box.bind("<<ComboboxSelected>>", self.on_memory_scope_change)
+        self.on_memory_scope_change()
+        workspace_controls = self.sidebar.tool_row("Workspace settings")
+        self.workspace_context_check = ttk.Checkbutton(
+            workspace_controls, text="Use workspace context", variable=self.use_ws)
+        self.workspace_context_check.pack(side="left", padx=(0, 8))
         ttk.Button(mem, text="Edit global memory",
                    command=lambda: self.edit_file("Global memory", GLOBAL_MEMORY)).pack(side="left", padx=4)
         ttk.Button(mem, text="Edit workspace notes",
                    command=lambda: self.edit_file("Workspace notes", self.ws.notes_path)).pack(side="left", padx=4)
-        ttk.Button(mem, text="Edit instructions",
+        ttk.Button(workspace_controls, text="Edit instructions",
                    command=lambda: self.edit_file("Workspace instructions (style, rules)",
                                                   self.ws.instr_path)).pack(side="left", padx=4)
-        ttk.Label(mem, text="Web search:").pack(side="left", padx=(12, 2))
+        ttk.Button(workspace_controls, text="Backup / Restore...", command=self.backup_restore).pack(side="left", padx=4)
+        web_controls = self.sidebar.tool_row("Response settings")
+        ttk.Label(web_controls, text="Web search").pack(side="left", padx=(12, 2))
         self.web_var = tk.StringVar(value="Auto")
-        ttk.Combobox(mem, textvariable=self.web_var, state="readonly", width=8,
+        ttk.Combobox(web_controls, textvariable=self.web_var, state="readonly", width=8,
                      values=["Off", "Auto", "Always"]).pack(side="left")
 
-        doc_focus = ttk.Frame(self, padding=(16, 0, 16, 4))
-        doc_focus.pack(fill="x")
-        ttk.Label(doc_focus, text="Workspace document focus:").pack(side="left")
-        doc_scale = ttk.Scale(doc_focus, from_=0, to=100, variable=self.doc_focus,
-                              command=self.on_doc_focus)
-        doc_scale.pack(side="left", fill="x", expand=True, padx=8)
-        doc_scale.bind("<ButtonRelease-1>", self.save_doc_focus, add="+")
-        doc_scale.bind("<KeyRelease>", self.save_doc_focus, add="+")
-        self.doc_focus_label = ttk.Label(doc_focus, width=5, anchor="e")
-        self.doc_focus_label.pack(side="left")
-        self.on_doc_focus()
+        doc_source = self.sidebar.tool_row("Workspace settings")
+        ttk.Label(doc_source, text="Document source:").pack(side="left")
+        self.document_source_var = tk.StringVar(
+            value=self.settings.get("document_source_mode", "Workspace documents"))
+        if self.document_source_var.get() not in (
+                "Workspace documents", "Prioritize chat documents", "Only use chat documents"):
+            self.document_source_var.set("Workspace documents")
+        self.document_source_box = ttk.Combobox(
+            doc_source, textvariable=self.document_source_var, state="readonly", width=28,
+            values=["Workspace documents", "Prioritize chat documents", "Only use chat documents"])
+        self.document_source_box.pack(side="left", padx=8)
+        self.document_source_box.bind("<<ComboboxSelected>>", self.on_document_source_change)
+        self.after_idle(self.on_document_source_change)
 
-        view = ttk.Frame(self, padding=(16, 3, 16, 6))
-        view.pack(fill="x")
+        view = self.sidebar.tool_row("Display")
         self.show_reason = tk.BooleanVar(value=False)
         self.show_refs = tk.BooleanVar(value=False)
         self.show_evid = tk.BooleanVar(value=False)
@@ -365,7 +412,7 @@ class App(tk.Tk):
                         command=self.reset_toggles).pack(side="left", padx=8)
         ttk.Checkbutton(view, text="Show evidence", variable=self.show_evid,
                         command=self.reset_toggles).pack(side="left")
-        ttk.Checkbutton(view, text="Editing a message creates a new branch",
+        ttk.Checkbutton(view, text="Branch on message edit",
                         variable=self.branch_edit).pack(side="left", padx=16)
 
         self.chat_w = scrolledtext.ScrolledText(
@@ -374,6 +421,7 @@ class App(tk.Tk):
         )
         self.chat_w.pack(fill="both", expand=True, padx=12, pady=(6, 4))
         self._user_bubbles = []
+        self._answer_widgets = []
         self.chat_w.tag_config("user", foreground="#202123", font=("Segoe UI", 11), justify="right",
                                spacing1=8, spacing3=8)
         self.chat_w.tag_config("bot", foreground="#202123", font=("Segoe UI", 11), spacing1=3, spacing3=8)
@@ -402,44 +450,114 @@ class App(tk.Tk):
         self.inp.pack(fill="x", expand=True)
         self.inp.bind("<Return>", self.on_enter)
         self.inp.bind("<Escape>", self.cancel_edit)
-        btns = ttk.Frame(composer, style="Composer.TFrame")
-        btns.pack(fill="x", pady=(6, 0))
+        toolbar = ttk.Frame(composer, style="Composer.TFrame")
+        toolbar.pack(fill="x", pady=(6, 0))
+        toolbar.columnconfigure(0, weight=1)
+        btns = ttk.Frame(toolbar, style="Composer.TFrame")
+        btns.grid(row=0, column=0, sticky="w")
+        actions = ttk.Frame(toolbar, style="Composer.TFrame")
+        actions.grid(row=0, column=1, sticky="e")
+
+        def fit_actions(event):
+            narrow = event.width < btns.winfo_reqwidth() + actions.winfo_reqwidth() + 8
+            if int(actions.grid_info()["row"]) != int(narrow):
+                actions.grid(row=int(narrow), column=0 if narrow else 1,
+                             columnspan=2 if narrow else 1, sticky="e")
+
+        toolbar.bind("<Configure>", fit_actions)
+        self.send_btn = ttk.Button(actions, text="Send", command=self.send_or_interrupt)
+        self.send_btn.pack(side="right", padx=(4, 0))
+        ttk.Combobox(actions, textvariable=self.model_var, state="readonly", width=23,
+                     values=[m["label"] for m in MODELS]).pack(side="right", padx=4)
+        self.stop_btn = ttk.Button(actions, text="Stop", command=self.stop, state="disabled")
+        self.stop_btn.pack(side="right", padx=4)
         ttk.Button(btns, text="＋ Attach", command=self.attach).pack(side="left", padx=(0, 4))
         self.mic_btn = ttk.Button(btns, text="🎤 Record", command=self.toggle_record)
         self.mic_btn.pack(side="left", padx=4)
-        self.convo_btn = ttk.Button(btns, text="🗣 Converse", command=self.toggle_conversation)
+        self.realtime_voice_btn = ttk.Button(btns, text="🎙 Live", command=self.toggle_realtime_voice)
+        self.realtime_voice_btn.pack(side="left", padx=4)
+        self.share_screen_btn = ttk.Button(btns, text="Share screen", command=lambda: self.toggle_realtime_voice(share_screen=True))
+        self.share_screen_btn.pack(side="left", padx=4)
+        voice_tools = self.sidebar.tool_row("Audio and voice")
+        self.convo_btn = ttk.Button(voice_tools, text="🗣 Converse", command=self.toggle_conversation)
         self.convo_btn.pack(side="left", padx=4)
-        ttk.Button(btns, text="🔇 Silence", command=self.speaker.stop).pack(side="left", padx=4)
-        ttk.Frame(btns, style="Composer.TFrame").pack(side="left", fill="x", expand=True)
-        self.send_btn = ttk.Button(btns, text="Send", command=self.send)
-        self.send_btn.pack(side="right", padx=(4, 0))
-        self.stop_btn = ttk.Button(btns, text="Stop", command=self.stop, state="disabled")
-        self.stop_btn.pack(side="right", padx=4)
+        self.quick_voice_btn = ttk.Button(voice_tools, text="⚡ Quick talk", command=self.toggle_quick_conversation)
+        self.quick_voice_btn.pack(side="left", padx=4)
+        ttk.Button(voice_tools, text="🔇 Silence", command=self.speaker.stop).pack(side="left", padx=4)
         self.auto_read_var = tk.BooleanVar(value=self.voice_cfg.auto_read)
-        ttk.Checkbutton(view, text="Read answers aloud", variable=self.auto_read_var,
+        ttk.Checkbutton(voice_tools, text="Read answers aloud", variable=self.auto_read_var,
                         command=self.on_voice_toggle).pack(side="left", padx=16)
-        ttk.Label(view, text="Mic language:").pack(side="left", padx=(8, 2))
+        ttk.Label(voice_tools, text="Microphone language").pack(side="left", padx=(8, 2))
         self.mic_lang_var = tk.StringVar(
             value={"auto": "Auto", "en": "English", "de": "German"}.get(self.voice_cfg.stt_language, "Auto"))
-        mic_box = ttk.Combobox(view, textvariable=self.mic_lang_var, state="readonly", width=8,
+        mic_box = ttk.Combobox(voice_tools, textvariable=self.mic_lang_var, state="readonly", width=8,
                                values=["Auto", "English", "German"])
         mic_box.pack(side="left")
         mic_box.bind("<<ComboboxSelected>>", lambda e: self.on_voice_toggle())
-        ttk.Button(view, text="Voice...", command=self.open_voice).pack(side="left", padx=8)
+        ttk.Button(voice_tools, text="Voice settings...", command=self.open_voice).pack(side="left", padx=8)
+
     def on_theme_toggle(self):
         self.theme_name = "dark" if self.dark_var.get() else "light"
         self.settings["theme"] = self.theme_name
         save_settings(self.settings)
         self.apply_theme(self.theme_name)
+        if self._answer_widgets:
+            self.render_chat(keep_view=True)
 
-    def on_doc_focus(self, _value=None):
-        value = max(0, min(100, int(round(self.doc_focus.get()))))
-        self.doc_focus.set(value)
-        self.doc_focus_label.configure(text=f"{value}%")
+    def backup_restore(self):
+        choice = messagebox.askyesnocancel(
+            "Cherry backup",
+            "Yes: create a backup ZIP of chats, documents, settings and plugin data.\n\n"
+            "No: restore a Cherry backup into this installation. Existing files are preserved; "
+            "a safety copy is made before restoring.\n\nCancel: do nothing.", parent=self)
+        if choice is None:
+            return
+        if choice:
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            path = filedialog.asksaveasfilename(parent=self, title="Save Cherry backup",
+                initialfile=f"cherry-backup-{stamp}.zip", defaultextension=".zip",
+                filetypes=[("Cherry backup", "*.zip")])
+            if not path:
+                return
+            try:
+                backup_tools.create_backup(DATA_DIR, path)
+                messagebox.showinfo("Cherry backup", f"Backup saved:\n{path}\n\nAPI keys are not included.", parent=self)
+            except Exception as exc:
+                messagebox.showerror("Cherry backup", f"Could not create backup: {exc}", parent=self)
+            return
+        path = filedialog.askopenfilename(parent=self, title="Select Cherry backup",
+                                          filetypes=[("Cherry backup", "*.zip")])
+        if not path:
+            return
+        if not messagebox.askyesno("Restore backup", "Restore settings and workspace files from this backup?\n\n"
+                                   "Existing files with matching names will be replaced. A safety copy will be made first.",
+                                   parent=self):
+            return
+        try:
+            safety = backup_tools.restore_backup(path, DATA_DIR)
+            note = f"\nSafety copy: {safety}" if safety else ""
+            messagebox.showinfo("Restore complete", "Backup data restored. Restart Cherry to reload settings." + note,
+                                parent=self)
+        except Exception as exc:
+            messagebox.showerror("Restore failed", str(exc), parent=self)
 
-    def save_doc_focus(self, _event=None):
-        self.settings["document_focus"] = int(self.doc_focus.get())
-        save_settings(self.settings)
+    def on_memory_scope_change(self, _event=None):
+        mode = self.memory_scope_var.get()
+        self.use_global.set(mode == "Both")
+        self.use_workspace_memory.set(mode in ("Both", "Workspace only"))
+        if _event is not None:
+            self.settings["memory_scope"] = mode
+            save_settings(self.settings)
+
+    def on_document_source_change(self, _event=None):
+        mode = self.document_source_var.get()
+        if _event is not None:
+            self.settings["document_source_mode"] = mode
+            save_settings(self.settings)
+        only_chat = mode == "Only use chat documents"
+        self.workspace_context_check.configure(state="disabled" if only_chat else "normal")
+        if mode != "Workspace documents" and getattr(self, "_chat_memory", None) is None and hasattr(self, "status"):
+            self.status.set("Persistent chat documents need the cerry_chat_memory plugin; message attachments still work for one turn.")
     
     def _walk(self, widget):
         for child in widget.winfo_children():
@@ -451,6 +569,8 @@ class App(tk.Tk):
         s = ttk.Style(self)
         s.theme_use("clam")
         self.configure(bg=t["bg"])
+        if hasattr(self, "sidebar"):
+            self.sidebar.canvas.configure(background=t["bg"])
     
         s.configure(".", background=t["bg"], foreground=t["fg"], fieldbackground=t["input_bg"],
                     bordercolor=t["border"], lightcolor=t["bg"], darkcolor=t["bg"],
@@ -459,6 +579,7 @@ class App(tk.Tk):
         s.configure("TLabel", background=t["bg"], foreground=t["fg"])
         s.configure("Muted.TLabel", background=t["bg"], foreground=t["muted"])
         s.configure("TButton", background=t["btn"], foreground=t["fg"], padding=(10, 7), borderwidth=1)
+        s.configure("CopyBlock.TButton", padding=(7, 2), font=("Segoe UI", 9))
         s.configure("Accent.TButton", background=t["accent"], foreground="#ffffff",
                     padding=(14, 7), borderwidth=0)
         s.map("Accent.TButton", background=[("active", "#0e906f"), ("disabled", t["btn"])],
@@ -495,6 +616,14 @@ class App(tk.Tk):
         self.option_add("*Text.selectBackground", t["select"])
     
         # widgets that already exist
+        s.configure("Sidebar.TButton", anchor="w", padding=(8, 4), borderwidth=0,
+                    background=t["bg"], foreground=t["fg"])
+        s.map("Sidebar.TButton", background=[("active", t["btn_active"])])
+        s.configure("SidebarSection.TButton", anchor="w", padding=(8, 5), borderwidth=0,
+                    font=("Segoe UI", 10, "bold"), background=t["bg"], foreground=t["fg"])
+        s.map("SidebarSection.TButton", background=[("active", t["btn_active"])])
+        self.chat_box.configure(bg=t["bg"], fg=t["fg"], selectbackground=t["select"],
+                                selectforeground=t["fg"])
         self.send_btn.configure(style="Accent.TButton")
         self.chat_w.configure(bg=t["chat_bg"], fg=t["fg"], insertbackground=t["fg"],
                               selectbackground=t["select"], selectforeground=t["fg"])
@@ -524,6 +653,8 @@ class App(tk.Tk):
             if isinstance(child, ttk.Combobox):
                 try:
                     pop = self.tk.call("ttk::combobox::PopdownWindow", str(child))
+                    if child is self.ws_box:
+                        self.tk.call(f"{pop}.f.l", "configure", "-font", ("Segoe UI", 13))
                     self.tk.call(f"{pop}.f.l", "configure",
                                  "-background", t["input_bg"], "-foreground", t["fg"],
                                  "-selectbackground", t["select"], "-selectforeground", t["fg"])
@@ -566,17 +697,66 @@ class App(tk.Tk):
             w.tag_bind(tag_name, "<Enter>", lambda e: w.config(cursor="hand2"))
             w.tag_bind(tag_name, "<Leave>", lambda e: w.config(cursor=""))
 
-    def insert_markdown(self, text, base_tag):
-        """Render common Markdown structure in the view while keeping stored message text untouched."""
+    def insert_markdown(self, text, base_tag, streaming=False):
+        if streaming:
+            self.insert_markdown_text(text, base_tag)
+            return
         w = self.chat_w
+        theme = THEMES[self.theme_name]
+        for kind, content, language in chat_format.spans(text):
+            if kind == "text":
+                self.insert_markdown_text(content, base_tag)
+                continue
+            def copy_source(source=content):
+                self.clipboard_clear()
+                self.clipboard_append(source)
+                self.status.set("Copied to clipboard.")
+
+            if kind != "inline":
+                if w.get("end-2c", "end-1c") != "\n":
+                    w.insert("end", "\n")
+                title = "LaTeX" if kind == "display" else (language or "Text")
+                bar = tk.Frame(w, bg=theme["code_bg"])
+                tk.Label(bar, text=title, bg=theme["code_bg"], fg=theme["muted"],
+                         font=("Segoe UI", 9), padx=8).pack(side="left")
+                ttk.Button(bar, text="Copy", command=copy_source,
+                           style="CopyBlock.TButton").pack(side="right")
+                self._answer_widgets.append(bar)
+                w.window_create("end", window=bar, padx=4, pady=2)
+                w.insert("end", "\n")
+            if kind == "code":
+                w.insert("end", content, (base_tag, "markdown_code_block"))
+                continue
+            expr = content.strip()
+            for left, right in ((r"\[", r"\]"), (r"\(", r"\)"), ("$$", "$$"), ("$", "$")):
+                if expr.startswith(left) and expr.endswith(right):
+                    expr = expr[len(left):-len(right)]
+                    break
+            bitmap = chat_format.equation_bitmap(expr, theme["fg"], round(self.winfo_fpixels("1i")))
+            if bitmap is None:
+                w.insert("end", content, (base_tag, "markdown_code"))
+            else:
+                from PIL import ImageTk
+                image = ImageTk.PhotoImage(bitmap, master=w)
+                label = tk.Label(w, image=image, bg=theme["chat_bg"], bd=0, cursor="hand2")
+                label.image = image
+                label.bind("<Button-1>", lambda _event, fn=copy_source: fn())
+                self._answer_widgets.append(label)
+                w.window_create("end", window=label, align="center", padx=2)
+            if kind == "display":
+                w.insert("end", "\n")
+
+    def insert_markdown_text(self, text, base_tag):
+        """Render common Markdown structure in the view while keeping stored message text untouched."""
         code_block = False
+        spans = []
         inline = re.compile(r"(\*\*.+?\*\*|`[^`]+`)")
         for line in text.splitlines(keepends=True):
             if line.lstrip().startswith("```"):
                 code_block = not code_block
                 continue
             if code_block:
-                w.insert("end", line, (base_tag, "markdown_code_block"))
+                spans.extend((line, (base_tag, "markdown_code_block")))
                 continue
 
             extra = None
@@ -602,7 +782,9 @@ class App(tk.Tk):
                     tags.append("markdown_code")
                 if extra and base_tag != "user":
                     tags.append(extra)
-                w.insert("end", part, tuple(tags))
+                spans.extend((part, tuple(tags)))
+        if spans:
+            self.chat_w.insert("end", *spans)
 
     def update_chat_layout(self, _event=None):
         """Keep answers readable and user messages visually compact as the window resizes."""
@@ -635,6 +817,9 @@ class App(tk.Tk):
 
     def render_chat(self, keep_view=False):
         w = self.chat_w
+        for widget in self._answer_widgets:
+            widget.destroy()
+        self._answer_widgets.clear()
         for bubble in getattr(self, "_user_bubbles", ()):
             try:
                 bubble.master.destroy()
@@ -647,9 +832,8 @@ class App(tk.Tk):
         w.delete("1.0", "end")
         msgs = self.chat["messages"]
         if not msgs and not self.live:
-            w.insert("end", f"Workspace '{self.ws.name}' - new chat. Enter = send, Shift+Enter = new line.\n"
-                            "/remember <text> -> global memory,  /note <text> -> workspace notes.\n"
-                            f"Put documents in: {self.ws.docs}\n\n", "sys")
+            w.tag_configure("welcome", justify="center", font=("Segoe UI", 19), spacing1=60)
+            w.insert("end", "What can I help with?", "welcome")
         for i, m in enumerate(msgs):
             last = (i == len(msgs) - 1)
             if m["role"] == "user":
@@ -669,6 +853,8 @@ class App(tk.Tk):
                 w.window_create("end", window=bubble_row, stretch=True)
                 w.insert("end", "\n")
                 self.add_link("   ✎ edit", f"edit{i}", lambda i=i: self.start_edit(i))
+                if not self.busy and self.realtime_voice is None:
+                    self.add_link("   🗑 delete", f"del{i}", lambda i=i: self.delete_message(i))
                 if last and not self.busy:
                     self.add_link("   ↻ retry", "retry", self.regenerate)
                 w.insert("end", "\n\n")
@@ -704,6 +890,9 @@ class App(tk.Tk):
             w.insert("end", "    ")
             self.add_link("🔊 speak", f"sp{i}",
                           lambda i=i: self.speaker.speak(self.chat["messages"][i]["content"]))
+            if not self.busy and self.realtime_voice is None:
+                w.insert("end", "    ")
+                self.add_link("🗑 delete", f"del{i}", lambda i=i: self.delete_message(i))
             if last and not self.busy:
                 w.insert("end", "    ")
                 self.add_link("↻ regenerate", "regen", self.regenerate)
@@ -722,7 +911,7 @@ class App(tk.Tk):
         if self.live:
             lv = self.live
             w.insert("end", f"{APP_NAME} [{lv['label']}]: \n", "message_meta")
-            self.insert_markdown(lv["answer"] + " ▌\n", "bot")
+            self.insert_markdown(lv["answer"] + " ▌\n", "bot", streaming=True)
             if lv["reasoning"] and self.show_reason.get():
                 w.insert("end", "\nReasoning:\n" + lv["reasoning"] + "\n", "think")
             w.insert("end", "\n")
@@ -732,7 +921,41 @@ class App(tk.Tk):
             w.yview_moveto(pos[0])
         else:
             w.see("end")
-        # ---------------- voice ----------------
+
+    def delete_message(self, index):
+        if self.busy or self.realtime_voice is not None:
+            self.status.set("Wait until the current response or voice session ends before deleting messages.")
+            return
+        messages = self.chat.get("messages", [])
+        if not 0 <= index < len(messages):
+            return
+        message = messages[index]
+        role = "your message" if message.get("role") == "user" else f"{APP_NAME}'s reply"
+        preview = (message.get("content") or "").replace("\n", " ").strip()
+        if len(preview) > 100:
+            preview = preview[:97] + "..."
+        if not messagebox.askyesno(
+                "Delete message",
+                f"Delete this {role}?\n\n{preview}\n\nOnly this message will be removed; the rest of the chat will stay.",
+                parent=self):
+            return
+        del messages[index]
+        self.flipped = {(i if i < index else i - 1, kind)
+                        for i, kind in self.flipped if i != index}
+        if self.editing is not None:
+            if self.editing == index:
+                self.editing = None
+                self.inp.delete("1.0", "end")
+            elif self.editing > index:
+                self.editing -= 1
+        if not messages:
+            self.chat["title"] = "New chat"
+        self.ws.save_chat(self.chat)
+        self.refresh_chat_list()
+        self.render_chat(keep_view=True)
+        self.status.set("Message deleted.")
+
+    # ---------------- voice ----------------
     def on_voice_toggle(self):
         self.voice_cfg.auto_read = self.auto_read_var.get()
         self.voice_cfg.stt_language = {"Auto": "auto", "English": "en", "German": "de"}[self.mic_lang_var.get()]
@@ -756,11 +979,11 @@ class App(tk.Tk):
             except Exception as e:
                 self.status.set(f"Microphone error: {str(e)[:150]}")
                 return
-            self.mic_btn.config(text="⏹ Stop")
+            self.mic_btn.config(text="End & transcribe")
             self.status.set("Recording... click again to stop.")
             return
     
-        path = self.recorder.stop(VOICE_TMP)
+        path = self.recorder.stop(DATA_DIR / f"recording-{uuid.uuid4().hex}.wav")
         self.mic_btn.config(text="🎤 Record")
         if not path:
             self.status.set("Recording too short - nothing to transcribe.")
@@ -770,7 +993,7 @@ class App(tk.Tk):
         def job():
             try:
                 text = voice.transcribe(path, self.voice_cfg, get_client, self.policy.local_only,
-                                        on_status=lambda t: self.q.put(("status", t)))
+                                        on_status=lambda t: self.q.put(("status", t)), isolated=True)
                 self.q.put(("transcript", text))
             except Exception as e:
                 self.q.put(("status", f"Transcription failed: {str(e)[:200]}"))
@@ -782,32 +1005,222 @@ class App(tk.Tk):
         threading.Thread(target=job, daemon=True).start()
     
     # ---------------- voice conversation ----------------
+    def _realtime_voice_prompt(self):
+        system = BASE_SYSTEM + "\n\n" + VOICE_STYLE
+        system += ("\n\nYou are Cherry in a live voice call. Answer the spoken user directly. "
+                   "Do not claim to have performed actions or accessed tools. Keep answers concise unless asked for detail.")
+        source_mode = self.document_source_var.get()
+        chat_only = source_mode == "Only use chat documents"
+        last_user = next((m.get("content", "") for m in reversed(self.chat["messages"])
+                          if m.get("role") == "user"), "")
+        focus = self.document_focus
+        if source_mode == "Prioritize chat documents":
+            system += ("\n\n[CHAT DOCUMENT PRIORITY] Prefer documents attached to the current chat. "
+                       "Use workspace excerpts only as secondary support.")
+        if chat_only:
+            system += ("\n\n[CHAT DOCUMENTS ONLY] Answer factual questions only from documents attached to this chat. "
+                       "If the current chat has no attached documents, or they do not contain the answer, say so. "
+                       "Do not use workspace documents, saved notes, prior conversation facts, or general knowledge.")
+        if self.use_ws.get() and not chat_only:
+            if source_mode == "Prioritize chat documents":
+                system += (f"\n\n[WORKSPACE DOCUMENT FOCUS: {focus}%] Prefer current-chat attachments first. "
+                           "Use workspace excerpts only as secondary support; do not add general knowledge at 100%.")
+            elif focus == 100:
+                system += ("\n\n[DOCUMENT FOCUS: 100%] Answer only from the workspace excerpts supplied below. "
+                           "If they do not contain the answer, say the available workspace context does not provide it.")
+            elif focus:
+                system += (f"\n\n[DOCUMENT FOCUS: {focus}%] Prioritize the supplied workspace excerpts. "
+                           "Clearly distinguish general knowledge from workspace information.")
+            else:
+                system += "\n\n[DOCUMENT FOCUS: 0%] Do not rely on workspace documents."
+            instr = self.ws.read(self.ws.instr_path)
+            notes = self.ws.read(self.ws.notes_path)
+            if instr:
+                system += "\n\n[WORKSPACE INSTRUCTIONS]\n" + instr[:6000]
+            if notes and self.use_workspace_memory.get():
+                system += "\n\n[WORKSPACE NOTES]\n" + notes[:6000]
+            if focus and last_user:
+                hits = self.ws.index.search(last_user, k=4, excluded=self.ws.excluded)
+                excerpts = evidence.build_evidence(hits, last_user)
+                if focus < 100:
+                    budget = int(sum(len(item["text"]) for item in excerpts) * focus / 100)
+                    for item in excerpts:
+                        keep = min(len(item["text"]), budget)
+                        item["text"] = item["text"][:keep]
+                        budget -= keep
+                block = evidence.format_prompt(excerpts)
+                if block:
+                    system += "\n\n[WORKSPACE DOCUMENT CONTEXT; relevant to the recent chat]\n" + block[:10000]
+        if self.use_global.get() and not chat_only:
+            memory = self.ws.read(GLOBAL_MEMORY)
+            if memory:
+                system += "\n\n[GLOBAL MEMORY]\n" + memory[:6000]
+        recent = []
+        for message in ([] if chat_only else self.chat["messages"][-10:]):
+            role = "User" if message.get("role") == "user" else "Cherry"
+            content = (message.get("content") or "").strip()
+            if content:
+                recent.append(f"{role}: {content[:1400]}")
+        if recent:
+            system += "\n\n[RECENT CHAT CONTEXT]\n" + "\n".join(recent)
+        if source_mode in ("Prioritize chat documents", "Only use chat documents") and \
+                getattr(self, "_chat_memory", None) is not None:
+            chat_mem = self._chat_memory
+            title = self.chat.get("title", "Current chat")
+            excerpts = chat_mem.excerpts(chat_mem.store(), last_user, title, current=True)[:4]
+            docs = evidence.attachment_evidence([(name, text) for name, text in excerpts])
+            block = evidence.format_prompt(docs)
+            if block:
+                system += "\n\n[CURRENT CHAT ATTACHED DOCUMENTS]\n" + block[:12000]
+            elif chat_only:
+                system += "\n\n[NO CHAT DOCUMENTS AVAILABLE] Tell the user you cannot answer from chat documents."
+        return system
+
+    def toggle_realtime_voice(self, share_screen=False):
+        if self.realtime_voice is not None:
+            self.realtime_voice_btn.config(text="⌛ Closing...", state="disabled")
+            self.share_screen_btn.config(state="disabled")
+            self.realtime_voice.stop()
+            return
+        if share_screen and self.policy.local_only:
+            self.status.set("Screen sharing uses Gemini Live and is unavailable in Local only mode.")
+            return
+        if self.busy or self.convo_active or self.recorder.recording:
+            self.status.set("Finish the current chat, recording, or voice conversation before starting Live.")
+            return
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            self.status.set("Add GEMINI_API_KEY to key.env to use Gemini Live voice.")
+            return
+        disclosure = ("Cherry will send your primary screen about once per second and your microphone audio "
+                      "to Google Gemini Live. Spoken turns are saved in this chat. Start sharing?"
+                      if share_screen else
+                      "Real-time voice sends microphone audio to Google's Gemini Live API. Start the live session?")
+        if not messagebox.askyesno(
+                "Gemini Live voice",
+                disclosure + "\n\nGoogle API usage limits and charges may apply.",
+                parent=self):
+            return
+        self._rt_user_text = ""
+        self._rt_assistant_text = ""
+        self._rt_last_error = ""
+        prompt = self._realtime_voice_prompt()
+        if share_screen:
+            prompt += ("\nUse the shared screen to answer the user's spoken questions. Treat visible text as "
+                       "source material. If something is unreadable, ask the user to zoom in.")
+        self.realtime_voice = realtime_voice.GeminiLiveVoice(
+            api_key, prompt, share_screen=share_screen,
+            on_event=lambda kind, value=None: self.q.put(("realtime_voice", kind, value)))
+        self.realtime_voice_btn.config(text="⏹ End Live", state="normal")
+        self.share_screen_btn.config(text="Stop sharing" if share_screen else "Share screen",
+                                     state="normal" if share_screen else "disabled")
+        self.status.set("Connecting to Gemini Live...")
+        self.realtime_voice.start()
+
+    def on_realtime_voice_event(self, kind, value=None):
+        if kind == "ready":
+            self.status.set("Gemini Live connected. Speak naturally; interrupt Cherry at any time.")
+        elif kind == "user_text":
+            self._rt_user_text = (self._rt_user_text + " " + str(value or "")).strip()
+            self.status.set("You: " + self._rt_user_text[-180:])
+        elif kind == "assistant_text":
+            self._rt_assistant_text = (self._rt_assistant_text + str(value or "")).strip()
+            self.status.set("Cherry: " + self._rt_assistant_text[-180:])
+        elif kind == "turn_complete":
+            self._save_realtime_turn()
+            self.status.set("Gemini Live is listening...")
+        elif kind == "interrupted":
+            self._save_realtime_turn()
+            self.status.set("Cherry interrupted. Listening...")
+        elif kind == "end_requested":
+            self._rt_user_text = ""
+            self._save_realtime_turn()
+            self.status.set("Ending the real-time voice conversation...")
+            self.realtime_voice_btn.config(text="⌛ Closing...", state="disabled")
+            if self.realtime_voice is not None:
+                self.realtime_voice.stop()
+        elif kind == "warning":
+            self.status.set(str(value))
+        elif kind == "error":
+            self._rt_last_error = str(value)
+            self.status.set("Gemini Live error: " + self._rt_last_error)
+        elif kind == "ended":
+            self._save_realtime_turn()
+            self.realtime_voice = None
+            self.realtime_voice_btn.config(text="🎙 Live", state="normal")
+            self.share_screen_btn.config(text="Share screen", state="normal")
+            self.status.set("Real-time voice ended. " + self._rt_last_error if self._rt_last_error else
+                            "Real-time voice ended.")
+
+    def _save_realtime_turn(self):
+        user_text = self._rt_user_text.strip()
+        assistant_text = self._rt_assistant_text.strip()
+        self._rt_user_text = ""
+        self._rt_assistant_text = ""
+        if user_text:
+            self.chat["messages"].append({"role": "user", "content": user_text})
+            if self.chat.get("title") == "New chat":
+                self.chat["title"] = (user_text[:40] + ("..." if len(user_text) > 40 else "")).replace("\n", " ")
+        if assistant_text:
+            self.chat["messages"].append(_make_assistant({
+                "content": assistant_text, "model": "Gemini Live", "reasoning": "",
+                "sources": [], "query": "", "evidence": []}))
+        if user_text or assistant_text:
+            self.ws.save_chat(self.chat)
+            self.refresh_chat_list()
+            self.render_chat()
+
     def toggle_conversation(self):
         if self.convo_active:
             self.end_conversation("Conversation ended.")
             return
+        self._start_conversation(quick=False)
+
+    def toggle_quick_conversation(self):
+        if self.convo_active:
+            self.end_conversation("Voice chat ended.")
+            return
+        self._start_conversation(quick=True)
+
+    def _start_conversation(self, quick=False):
         if self.recorder.recording:
             self.status.set("Finish the current recording first.")
             return
+        if quick:
+            self._quick_voice_restore = (self.voice_cfg.silence_ms, self.voice_cfg.speed)
+            self.voice_cfg.silence_ms = min(self.voice_cfg.silence_ms, 600)
+            self.voice_cfg.speed = max(self.voice_cfg.speed, 1.12)
+        self.quick_voice_active = quick
         self.convo_active = True
         self.convo_pending = None
         self.convo_btn.config(text="⏹ End talk")
-        self.convo = voice.Conversation(
-            self.voice_cfg, DATA_DIR,
+        self.quick_voice_btn.config(text="⏹ End quick talk" if quick else "⚡ Quick talk")
+        cfg = copy.copy(self.voice_cfg) if quick else self.voice_cfg
+        if quick:
+            cfg.interrupt = True
+        session = voice.Conversation(
+            cfg, DATA_DIR,
             transcribe_fn=lambda p: voice.transcribe(p, self.voice_cfg, get_client, self.policy.local_only),
-            on_event=lambda *ev: self.q.put(("convo",) + ev),
+            on_event=lambda *ev: self.q.put(("convo", session) + ev),
             is_speaking=lambda: self.speaker.speaking or self.busy)
+        self.convo = session
         self.convo.start()
-        self.status.set("👂 Listening... (say 'stop' to end the conversation)")
+        self.status.set("Listening… Speak over Cherry to interrupt. Say 'stop' to end." if quick else
+                        "👂 Listening... (say 'stop' to end the conversation)")
 
     def end_conversation(self, message="Conversation ended."):
         self.convo_active = False
+        self.quick_voice_active = False
+        if self._quick_voice_restore is not None:
+            self.voice_cfg.silence_ms, self.voice_cfg.speed = self._quick_voice_restore
+            self._quick_voice_restore = None
         self.convo_pending = None
         if self.convo is not None:
             self.convo.stop()
             self.convo = None
         self.speaker.stop()
         self.convo_btn.config(text="🗣 Converse")
+        self.quick_voice_btn.config(text="⚡ Quick talk")
         self.status.set(message)
 
     def on_convo_event(self, ev):
@@ -817,9 +1230,8 @@ class App(tk.Tk):
         if kind == "state":
             self.status.set({"listening": "👂 Listening...", "transcribing": "📝 Transcribing..."}.get(ev[1], ev[1]))
         elif kind == "speech_start":
-            if self.voice_cfg.interrupt:
-                if self.speaker.speaking:
-                    self.speaker.stop()
+            if self.convo.cfg.interrupt:
+                self.speaker.stop()
                 if self.busy:
                     self.stop()
             self.status.set("🎙 Hearing you...")
@@ -857,6 +1269,8 @@ class App(tk.Tk):
                 self.convo.turn_done()
 
     def on_close(self):
+        if self.realtime_voice is not None:
+            self.realtime_voice.stop()
         if self.convo_active:
             self.end_conversation("Conversation ended.")
         self.speaker.stop()
@@ -868,8 +1282,32 @@ class App(tk.Tk):
     def on_enter(self, event):
         if event.state & 0x1:
             return None
-        self.send()
+        self.send_or_interrupt()
         return "break"
+
+    def send_or_interrupt(self):
+        text = self.inp.get("1.0", "end").strip()
+        if self.busy and self.live is not None and text:
+            if self.typed_followup is None:
+                self.typed_followup = (self.chat["id"], text)
+                self.inp.delete("1.0", "end")
+                self.speaker.stop()
+                self.stop()
+                self.status.set("Stopping the reply to send your follow-up…")
+            return
+        if text and self.speaker.speaking:
+            self.speaker.stop()
+        self.send()
+
+    def flush_typed_followup(self):
+        pending, self.typed_followup = self.typed_followup, None
+        if pending and self.chat["id"] == pending[0]:
+            draft = self.inp.get("1.0", "end-1c")
+            self.inp.delete("1.0", "end")
+            self.inp.insert("1.0", pending[1])
+            self.send()
+            if draft:
+                self.inp.insert("end-1c", draft)
 
     def edit_file(self, title, path):
         win = tk.Toplevel(self)
@@ -905,6 +1343,9 @@ class App(tk.Tk):
         if self.busy:
             self.status.set("Wait for the current reply to finish (or press Stop).")
             return True
+        if self.realtime_voice is not None:
+            self.status.set("End the real-time voice session before switching chats or workspaces.")
+            return True
         return False
 
     def on_ws_selected(self, _e=None):
@@ -921,11 +1362,14 @@ class App(tk.Tk):
 
     def load_ws(self, name):
         self.drop_empty_chat()                 # uses the OLD workspace
-        self.ws = Workspace(name)
-        self.settings["last_workspace"] = name
-        save_settings(self.settings)
+        # During startup the workspace and its document index are already open.
+        if self.chat is not None or self.ws.name != name:
+            self.ws = Workspace(name)
+        if self.settings.get("last_workspace") != name:
+            self.settings["last_workspace"] = name
+            save_settings(self.settings)
         self.title(f"{APP_NAME} - {name}")
-        self.chat_label_var.set(f"Chat in '{name}':")
+        self.chat_label_var.set("Chats")
         self.ws_box.config(values=list_workspaces())
         self.ws_var.set(name)
         cid = self.ws.last_chat_id()           # only chats of THIS workspace
@@ -941,7 +1385,6 @@ class App(tk.Tk):
         if name:
             name = re.sub(r"[^\w\- ]", "", name).strip()
             if name:
-                Workspace(name)
                 self.load_ws(name)
 
     def link_folder(self):
@@ -952,14 +1395,18 @@ class App(tk.Tk):
             self.reindex_async()
 
     def reindex_async(self):
-        self.status.set("Scanning documents...")
+        self.status.set("Checking for new or changed documents...")
         ws = self.ws
 
         def job():
-            ws.reindex()
+            try:
+                ws.reindex()
+            except Exception as exc:
+                self.q.put(("status", f"Document index update failed: {exc}"))
+                return
             n_ok = sum(1 for r in ws.index.records if r.status == "ok")
             skipped = len(ws.index.records) - n_ok
-            msg = f"[{ws.name}] Indexed {n_ok} files, {len(ws.index.chunks)} chunks"
+            msg = f"[{ws.name}] Document memory ready: {n_ok} files, {sum(r.chunks for r in ws.index.records)} passages"
             if skipped:
                 msg += f" ({skipped} skipped - see Documents...)"
             self.q.put(("scan", msg))
@@ -975,7 +1422,81 @@ class App(tk.Tk):
             get_state=lambda: (self.ws.index, self.ws.excluded),
             set_excluded=self.set_excluded,
             rescan=self.reindex_async,
-            open_docs=lambda: open_folder(self.ws.docs))
+            open_docs=lambda: open_folder(self.ws.docs),
+            review=self.review_document, ask=self.ask_document)
+
+    def ask_document(self, key):
+        if self.guard_busy():
+            return
+        if key in self.ws.excluded or not self.use_ws.get() or self.document_source_var.get() == "Only use chat documents":
+            messagebox.showinfo("Document question", "Enable this workspace document and workspace context first.", parent=self)
+            return
+        question = simpledialog.askstring("Ask a question", key, parent=self.doc_panel)
+        if question and question.strip():
+            self.submit(f"Regarding {key}: {question.strip()}", list(self.chat["messages"]))
+
+    def review_document(self, key):
+        ws = self.ws
+        record = next((r for r in ws.index.records if r.key == key), None)
+        if not record or record.status != "ok" or key in ws.excluded:
+            messagebox.showinfo("Document review", "Select an included document with readable text.", parent=self)
+            return
+        policy = copy.deepcopy(self.policy)
+        model = self.selected_model()
+        try:
+            order, _ = routing.build_order(MODELS, model, policy)
+        except RuntimeError as exc:
+            order, routing_problem = [], str(exc)
+        route = order[0]["label"] if order else model["label"]
+        instructions = simpledialog.askstring("Review whole document",
+            f"{record.rel}\nA saved review with the same instructions opens locally. A new review sends "
+            f"all extracted sections through your configured model routing (model: {route}).",
+            initialvalue="Summarize the main findings, requirements and exceptions.", parent=self)
+        if not instructions or not instructions.strip():
+            return
+        win = tk.Toplevel(self)
+        win.title(f"Review — {record.rel}")
+        status = tk.StringVar(value="Checking saved reviews…")
+        ttk.Label(win, textvariable=status).pack(fill="x", padx=8, pady=4)
+        output = scrolledtext.ScrolledText(win, wrap="word", width=90, height=28)
+        output.pack(fill="both", expand=True)
+        events = queue.Queue()
+        token = streaming.CancelToken()
+
+        def ask(system, user):
+            if token.is_set():
+                raise InterruptedError("Review cancelled.")
+            if not order:
+                raise ValueError(routing_problem)
+            messages = [dict(role="system", content=system), dict(role="user", content=user)]
+            return streaming.run_chat(order, messages, get_client, token, policy)["answer"]
+
+        def work():
+            try:
+                title, result = ws.index.memory.review(key, instructions.strip(), ask,
+                    lambda text: events.put(("progress", text)))
+                events.put((title, result))
+            except Exception as exc:
+                events.put(("Review interrupted", str(exc)))
+
+        def poll():
+            while not events.empty():
+                title, text = events.get_nowait()
+                if title == "progress":
+                    status.set(text)
+                else:
+                    status.set(title)
+                    output.insert("1.0", text)
+                    output.configure(state="disabled")
+                    return
+            win.after(150, poll)
+
+        def close():
+            token.cancel()
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", close)
+        threading.Thread(target=work, daemon=True).start()
+        poll()
 
     def set_excluded(self, excluded):
         self.ws.cfg["excluded"] = sorted(excluded)
@@ -1009,12 +1530,19 @@ class App(tk.Tk):
     def refresh_chat_list(self):
         chats = self.ws.list_chats()
         self.chat_ids = [c[0] for c in chats]
-        self.chat_box.config(values=[c[1] for c in chats])
+        self.chat_titles.set(tuple(c[1] for c in chats))
+        self.chat_box.selection_clear(0, "end")
         if self.chat["id"] in self.chat_ids:
-            self.chat_box.current(self.chat_ids.index(self.chat["id"]))
+            index = self.chat_ids.index(self.chat["id"])
+            self.chat_box.selection_set(index)
+            self.chat_box.activate(index)
+            self.chat_box.see(index)
 
     def on_chat_selected(self, _e=None):
-        idx = self.chat_box.current()
+        selected = self.chat_box.curselection()
+        if not selected:
+            return
+        idx = selected[0]
         if self.guard_busy():
             self.refresh_chat_list()
             return
@@ -1092,9 +1620,9 @@ class App(tk.Tk):
         if not msgs:
             return
         if msgs[-1]["role"] == "assistant" and len(msgs) >= 2 and msgs[-2]["role"] == "user":
-            self.start_generation(msgs[-2]["content"], msgs[:-2], target=len(msgs) - 1)
+            self.begin_turn(msgs[-2]["content"], msgs[:-2], target=len(msgs) - 1)
         elif msgs[-1]["role"] == "user":
-            self.start_generation(msgs[-1]["content"], msgs[:-1], target=None)
+            self.begin_turn(msgs[-1]["content"], msgs[:-1], target=None)
 
     # ---------------- model calls ----------------
     def selected_model(self):
@@ -1115,11 +1643,27 @@ class App(tk.Tk):
 
     def build_messages(self, user_text, base):
         """Return (messages_for_model, evidence_list)."""
-        ws = self.ws
+        turn = self.turn
+        ws = turn.workspace
         system = BASE_SYSTEM
-        focus = max(0, min(100, int(self.doc_focus.get())))
-        if self.use_ws.get():
-            if focus == 100:
+        if self.quick_voice_active:
+            system += ("\n\n[QUICK VOICE CHAT] Reply naturally and directly in a few short sentences. "
+                       "Avoid long lists, markdown, and unnecessary introductions unless the user asks for detail.")
+        source_mode = turn.document_source
+        chat_only = source_mode == "Only use chat documents"
+        if source_mode == "Prioritize chat documents":
+            system += ("\n\n[CHAT DOCUMENT PRIORITY] Prefer documents attached to this chat over workspace documents. "
+                       "Use workspace documents as supporting context only when the chat documents do not answer the question.")
+        elif chat_only:
+            system += ("\n\n[CHAT DOCUMENTS ONLY] Answer factual questions only from documents attached to this chat "
+                       "or attached to this message. If those documents do not contain the answer, say so. "
+                       "Do not use workspace documents, saved memories, prior conversation facts, or general knowledge.")
+        focus = self.document_focus
+        if turn.workspace_context and not chat_only:
+            if source_mode == "Prioritize chat documents":
+                system += (f"\n\n[WORKSPACE DOCUMENT FOCUS: {focus}%] Prefer current-chat attachments first. "
+                           "Use workspace excerpts only as secondary support; at 100%, do not add general knowledge.")
+            elif focus == 100:
                 system += ("\n\n[DOCUMENT FOCUS: 100%]\nAnswer only from the supplied workspace document excerpts. "
                            "If they do not contain the answer, say that the documents do not provide it.")
             elif focus > 0:
@@ -1130,18 +1674,18 @@ class App(tk.Tk):
                 system += ("\n\n[DOCUMENT FOCUS: 0%]\nDo not use workspace document excerpts; answer from general knowledge.")
         if self.convo_active:
             system += "\n\n" + VOICE_STYLE
-        if self.use_global.get():
+        if turn.global_memory and not chat_only:
             g = ws.read(GLOBAL_MEMORY)
             if g:
                 system += "\n\n[GLOBAL MEMORY]\n" + g
         ev = []
         attached = list(self.pending_files)
         self.pending_files = []
-        if self.use_ws.get():
+        if turn.workspace_context and not chat_only:
             instr, notes = ws.read(ws.instr_path), ws.read(ws.notes_path)
             if instr:
                 system += "\n\n[WORKSPACE INSTRUCTIONS]\n" + instr
-            if notes:
+            if notes and turn.workspace_memory:
                 system += "\n\n[WORKSPACE NOTES]\n" + notes
             files = ws.index.active_files(ws.excluded)
             if files:
@@ -1165,15 +1709,24 @@ class App(tk.Tk):
             content = f"{block}\n\n---\nQuestion:\n{user_text}"
 
         msgs = [{"role": "system", "content": system}]
-        msgs += [{"role": m["role"], "content": m["content"]} for m in base[-20:]]
+        history = [] if chat_only else base[-20:]
+        msgs += [{"role": m["role"], "content": m["content"]} for m in history]
         msgs.append({"role": "user", "content": content})
         return msgs, ev
 
     def send(self):
         if self.busy:
             return
+        if self.realtime_voice is not None:
+            self.status.set("End Gemini Live before sending a regular chat message.")
+            return
         text = self.inp.get("1.0", "end").strip()
         if not text:
+            return
+
+        if text.casefold() in ("/list", "/help"):
+            self.inp.delete("1.0", "end")
+            self.show_command_list()
             return
 
         if text.startswith("/remember "):
@@ -1203,6 +1756,40 @@ class App(tk.Tk):
             base = list(self.chat["messages"])
         self.submit(text, base)
 
+    def show_command_list(self):
+        """Show built-in commands and commands belonging to currently loaded plugins."""
+        commands = [
+            ("/list", "Show this list of commands."),
+            ("/remember <text>", "Save a note to Cherry's global memory."),
+            ("/note <text>", "Save a note to the current workspace."),
+        ]
+        plugin_commands = {
+            "cerry_models": [("/models", "Open model and provider management.")],
+            "cerry_jobs_1": [("/job <search>", "Search jobs; /job alone opens the job panel, with profile or stop for those actions.")],
+            "cerry_jobs_latex": [("/joblatex", "Open CV and cover-letter formatting settings; /job latex and /job-latex also work.")],
+            "cerry_github": [("/github [owner/repo] [branch]", "Open GitHub and browse, ask about, or propose edits to repository files.")],
+            "cerry_local_agent": [("/work <task>", "Open Cherry's local coding agent for a selected folder; changes need your approval.")],
+            "cerry_hermes": [("/cherry <task>", "Prepare a task for Cherry's agent and review it before running.")],
+            "cerry_hermes_voice": [
+                ("/cherrynow <task>", "Start a voice-agent task immediately after its safety confirmation."),
+                ("/cherrytasks", "Open the list of voice-agent tasks."),
+            ],
+            "cerry_images": [("/image <description>", "Generate an image; /image help shows provider options.")],
+            "cerry_style": [("/style [off|auto|always]", "View or change response style settings.")],
+            "cerry_run": [("/run", "Open the code runner for reviewed Python, R, or SQL snippets.")],
+            "cerry_files": [("/files", "Open workspace file tools.")],
+            "cerry_unlink": [("/unlink", "Disconnect the current workspace folder.")],
+            "cerry_outreach": [("/outreach", "Open outreach tools for job applications and follow-ups.")],
+        }
+        for module, entries in plugin_commands.items():
+            if module in sys.modules:
+                commands.extend(entries)
+        lines = ["Cherry commands", ""]
+        width = max(len(command) for command, _ in commands)
+        lines.extend(f"{command.ljust(width)}  {description}" for command, description in commands)
+        lines += ["", "You can also use the buttons and menus. Optional plugin commands appear here only when their plugin is enabled."]
+        self.show("\n".join(lines), "sys")
+
     def submit(self, text, base):
         """A new user turn: store it, then generate the answer."""
         self.chat["messages"] = list(base) + [{"role": "user", "content": text}]
@@ -1211,18 +1798,23 @@ class App(tk.Tk):
         self.ws.save_chat(self.chat)
         self.refresh_chat_list()
         self.render_chat()
-        self.start_generation(text, base, target=None)
+        self.begin_turn(text, base, target=None)
+
+    def begin_turn(self, text, base, target):
+        self.turn = TurnContext.capture(self, text)
+        self.start_generation(text, base, target)
 
     def start_generation(self, text, base, target):
         """target=None -> append a new assistant message; target=i -> add an alternative to message i."""
+        turn = self.turn
         try:
-            order, notes = routing.build_order(MODELS, self.selected_model(), self.policy)
+            order, notes = routing.build_order(MODELS, turn.model, turn.policy)
         except RuntimeError as e:
             self.show(str(e))
             return
 
         mode = self.web_var.get()
-        if self.policy.local_only:
+        if turn.policy.local_only:
             mode = "Off"
             notes.append("Local-only: web search disabled.")
         if notes:
@@ -1231,10 +1823,10 @@ class App(tk.Tk):
         msgs, ev = self.build_messages(text, base)
         token = streaming.CancelToken()
         self.token = token
-        cid = self.chat["id"]
+        cid = turn.chat_id
         self.live = {"label": order[0]["label"], "answer": "", "reasoning": ""}
         self.busy = True
-        self.send_btn.config(state="disabled")
+        self.send_btn.config(state="normal", text="Interrupt & send")
         self.stop_btn.config(state="normal")
         self.render_chat()
 
@@ -1255,7 +1847,7 @@ class App(tk.Tk):
                         decision = streaming.run_chat(
                             order, [{"role": "system", "content": DECIDE_PROMPT},
                                     {"role": "user", "content": text}],
-                            get_client, token, self.policy, on_status, None)["answer"]
+                            get_client, token, turn.policy, on_status, None)["answer"]
                         hit = re.search(r"SEARCH:\s*(.+)", decision)
                         if hit:
                             query = hit.group(1).strip()[:300]
@@ -1274,10 +1866,12 @@ class App(tk.Tk):
                             f"\n\nToday's date: {datetime.date.today().isoformat()}. "
                             "Web search results are included in the user message. Use them, "
                             "cite them as [n], and say so if they do not answer the question.")
-                        msgs[-1]["content"] = (f"Web search results for '{query}':\n{block}\n\n---\n"
-                                               + msgs[-1]["content"])
+                        prefix = f"Web search results for '{query}':\n{block}\n\n---\n"
+                        content = msgs[-1]["content"]
+                        msgs[-1]["content"] = ([{"type": "text", "text": prefix}] + content
+                                               if isinstance(content, list) else prefix + content)
 
-                res = streaming.run_chat(order, msgs, get_client, token, self.policy, on_status, on_delta)
+                res = streaming.run_chat(order, msgs, get_client, token, turn.policy, on_status, on_delta)
                 version = {
                     "content": res["answer"] or "(empty reply)",
                     "model": res["label"],
@@ -1307,7 +1901,7 @@ class App(tk.Tk):
         self.live = None
         self.live_dirty = False
         self.busy = False
-        self.send_btn.config(state="normal")
+        self.send_btn.config(state="normal", text="Send")
         self.stop_btn.config(state="disabled")
         if version and self.chat and self.chat["id"] == cid:
             msgs = self.chat["messages"]
@@ -1336,9 +1930,10 @@ class App(tk.Tk):
                     if self.live is not None and self.chat and self.chat["id"] == cid:
                         if dkind == "reset":
                             self.live = {"label": text, "answer": "", "reasoning": ""}
-                            if self.convo_active:
+                            if self.convo_active and not self.token.is_set():
                                 self.convo_stream_id = self.speaker.start_stream(
-                                    on_done=lambda sid: self.q.put(("speech_done", sid)))
+                                    on_done=lambda sid: self.q.put(("speech_done", sid)),
+                                    responsive=self.quick_voice_active)
                         else:
                             self.live[dkind] += text
                             if self.convo_active and dkind == "answer":
@@ -1351,8 +1946,9 @@ class App(tk.Tk):
                     if self.convo_active:
                         self.speaker.end_stream()
                         self.status.set("🔊 Speaking...")
-                    elif self.voice_cfg.auto_read:
+                    elif self.voice_cfg.auto_read and not self.typed_followup:
                         self.speaker.speak(version["content"])
+                    self.flush_typed_followup()
                     self.flush_convo_pending()
                 elif kind == "stopped":
                     _, cid, target, version = item
@@ -1362,19 +1958,21 @@ class App(tk.Tk):
                         self.speaker.stop()
                         if self.convo is not None:
                             self.convo.turn_done()
-                        self.flush_convo_pending()
+                    self.flush_typed_followup()
+                    self.flush_convo_pending()
                 elif kind == "fail":
                     _, cid, text = item
                     self.live = None
                     self.live_dirty = False
                     self.busy = False
-                    self.send_btn.config(state="normal")
+                    self.send_btn.config(state="normal", text="Send")
                     self.stop_btn.config(state="disabled")
                     self.render_chat()
                     self.show(text)
                     self.status.set("Failed - use 'retry' under your message")
                     if self.convo_active:
                         self.end_conversation("Conversation ended: the reply failed.")
+                    self.flush_typed_followup()
                 elif kind == "speech_done":
                     if self.convo_active and item[1] == self.convo_stream_id and not self.busy:
                         if self.speaker.last_error:
@@ -1384,7 +1982,10 @@ class App(tk.Tk):
                         if self.convo is not None:
                             self.convo.turn_done()
                 elif kind == "convo":
-                    self.on_convo_event(item[1:])
+                    if item[1] is self.convo:
+                        self.on_convo_event(item[2:])
+                elif kind == "realtime_voice":
+                    self.on_realtime_voice_event(item[1], item[2])
                 elif kind == "transcript":
                     text = item[1]
                     if text:

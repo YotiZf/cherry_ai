@@ -8,7 +8,7 @@ What it does
  - Hermes tasks offer the models of the main Model box, in the same order, and re-read it every time you open the
    Hermes window or the task editor, so new, renamed and removed models appear without restarting.
  - Providers that Hermes knows: gemini, groq, openrouter and nvidia (added by this plugin; Hermes has an "nvidia"
-   provider that uses NVIDIA_API_KEY). Models of other providers, for example AnythingLLM, are skipped, and the
+   provider that uses NVIDIA_API_KEY). Models of other providers, for example Ollama, are skipped, and the
    reason is written to ai_workspace_data/hermes_models.log (rewritten whenever the list changes) and shown in the
    status line. Extra providers can be added in ai_workspace_data/hermes.json:
    "provider_slugs": {"myprovider": "its-hermes-name"}

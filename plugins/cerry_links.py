@@ -25,12 +25,10 @@ Safety and privacy
 Settings: ai_workspace_data/links.json. Enable: "cerry_links" in plugins.json.
 """
 import base64
-import ipaddress
 import json
 import os
 import queue
 import re
-import socket
 import tempfile
 import threading
 import time
@@ -42,6 +40,8 @@ import tkinter as tk
 from tkinter import ttk
 
 import httpx
+
+from core.public_web import host_is_public, read_prefix
 
 ORDER = 160
 DEFAULTS = {'enabled': True, 'max_links': 4, 'max_chars': 15000, 'max_attachments': 8,
@@ -74,14 +74,6 @@ def only_urls(text):
     return len(re.findall(r'\w+', rest)) <= 2
 
 
-def host_is_public(host):
-    try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    except OSError:
-        return False
-    return bool(infos) and all(ipaddress.ip_address(i[4][0].split('%')[0]).is_global for i in infos)
-
-
 def check_url(url):
     u = urlsplit(url.strip())
     if u.scheme != 'https' or not u.hostname or u.username or u.password or u.port not in (None, 443):
@@ -112,12 +104,7 @@ def fetch(url, html_limit=2_500_000, pdf_limit=15_000_000):
                 if not is_pdf and ctype and not any(k in ctype for k in ('html', 'text/', 'xml', 'json')):
                     raise LinkError('unsupported content type (%s)' % ctype.split(';')[0])
                 limit = pdf_limit if is_pdf else html_limit
-                data = b''
-                for chunk in r.iter_bytes():
-                    data += chunk
-                    if len(data) > limit:
-                        break
-                return current, ('application/pdf' if is_pdf else ctype), data[:limit]
+                return current, ('application/pdf' if is_pdf else ctype), read_prefix(r, limit)
     raise LinkError('too many redirects')
 
 
@@ -532,8 +519,7 @@ def install(ns):
             original_init(app, *args, **kwargs)
             try:
                 app._links = Links(app, ns, cfg, note)
-                strip = ttk.Frame(app, padding=(6, 0))
-                strip.pack(fill='x', before=app.inp.master)
+                strip = app.sidebar.tool_row("Files and images")
                 ttk.Checkbutton(strip, text='Read links automatically', variable=app._links.enabled,
                                 command=app._links.save).pack(side='left', padx=2)
                 ttk.Label(strip, style='Muted.TLabel',

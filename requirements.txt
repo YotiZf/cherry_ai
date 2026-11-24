@@ -4,6 +4,7 @@ httpx
 openai
 beautifulsoup4
 Pillow
+matplotlib
 python-docx
 pypdf
 pdfplumber
@@ -15,6 +16,7 @@ sounddevice
 faster-whisper
 piper-tts
 lingua-language-detector
+google-genai
 
 # Job search and document/image ingestion
 python-jobspy

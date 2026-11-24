@@ -18,11 +18,9 @@ Results go to a NEW subfolder (cerry_output) so nothing is overwritten. Always r
 Text from your CV, offers and web pages is sent to the model provider you selected, unless Local only is on.
 """
 import datetime as dt
-import ipaddress
 import json
 import queue
 import re
-import socket
 import threading
 import traceback
 from html.parser import HTMLParser
@@ -32,6 +30,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 import httpx
+
+from core.public_web import host_is_public, read_prefix
 
 ORDER = 85
 TEXT_EXT = {'.txt', '.md', '.tex', '.html', '.htm'}
@@ -210,14 +210,6 @@ def lang_rule(lang, what):
     return 'Language: write in %s.' % lang
 
 
-def host_is_public(host):
-    try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    except OSError:
-        return False
-    return bool(infos) and all(ipaddress.ip_address(i[4][0].split('%')[0]).is_global for i in infos)
-
-
 def check_url(url):
     u = urlsplit(url.strip())
     if u.scheme != 'https' or not u.hostname or u.username or u.password or u.port not in (None, 443):
@@ -242,12 +234,7 @@ def fetch_page(url, limit=1_500_000):
                 ctype = r.headers.get('content-type', '').lower()
                 if ctype and not any(k in ctype for k in ('html', 'text/plain', 'xml')):
                     raise RuntimeError('not an HTML page (%s)' % ctype)
-                data = b''
-                for chunk in r.iter_bytes():
-                    data += chunk
-                    if len(data) > limit:
-                        break
-                return current, data[:limit].decode(r.encoding or 'utf-8', errors='replace')
+                return current, read_prefix(r, limit).decode(r.encoding or 'utf-8', errors='replace')
     raise RuntimeError('too many redirects')
 
 
@@ -744,12 +731,7 @@ def install(ns):
     def init(app, *args, **kwargs):
         original_init(app, *args, **kwargs)
         app.outreach = Panel(app, ns)
-        bar = ttk.Frame(app, padding=(6, 0))
-        chat = chat_widget(app)
-        try:
-            bar.pack(fill='x', before=chat.frame)
-        except (tk.TclError, AttributeError):
-            bar.pack(fill='x')
+        bar = app.sidebar.tool_row("Jobs")
         ttk.Button(bar, text='Outreach...', command=app.outreach.open).pack(side='left')
         tag = 'OutreachCommand'
         app.inp.bindtags((tag,) + tuple(app.inp.bindtags()))

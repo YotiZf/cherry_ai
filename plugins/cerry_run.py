@@ -330,8 +330,7 @@ def install(ns):
     def init(app, *a, **k):
         original_init(app, *a, **k)
         app._run = Runner(app, ns)
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Agents")
         ttk.Button(strip, text="Run code...", command=app._run.open).pack(side="left", padx=2)
         ttk.Label(strip, text="Python / R / SQL - press Run on a code box in the chat, or type /run", style="Muted.TLabel").pack(side="left", padx=8)
 

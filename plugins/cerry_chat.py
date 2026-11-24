@@ -68,7 +68,8 @@ def install(ns):
         return live is not None and app._cc_shown < len(live["answer"]) - 1
 
     def should_hold(app):
-        if not cps(app) or getattr(app, "convo_active", False) or not behind(app):
+        if (not cps(app) or getattr(app, "convo_active", False)
+                or (app.token and app.token.is_set()) or not behind(app)):
             app._cc_hold_since = None
             return False
         now = time.monotonic()
@@ -140,7 +141,7 @@ def install(ns):
             w.config(state="normal")
             w.delete(MARK, "end")
             w.insert("end", f"{name} [{live['label']}]: \n", "message_meta")
-            app.insert_markdown(shown + " \u258c\n", "bot")
+            app.insert_markdown(shown + " \u258c\n", "bot", streaming=True)
             if live["reasoning"] and app.show_reason.get():
                 w.insert("end", "\nReasoning:\n" + live["reasoning"] + "\n", "think")
             w.insert("end", "\n")
@@ -193,8 +194,7 @@ def install(ns):
         app._cc_state, app._cc_fast, app._cc_full = None, 0, 0
         original_init(app, *a, **k)
         app._cc_choice = tk.StringVar(value=saved)
-        strip = ttk.Frame(app, padding=(6, 0))
-        strip.pack(fill="x", before=app.inp.master)
+        strip = app.sidebar.tool_row("Response settings")
         ttk.Label(strip, text="Text speed:").pack(side="left", padx=(2, 4))
         box = ttk.Combobox(strip, textvariable=app._cc_choice, state="readonly", width=10, values=list(SPEEDS))
         box.pack(side="left")

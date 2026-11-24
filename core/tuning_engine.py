@@ -131,6 +131,8 @@ class Tuner:
 # ---------------------------------------------------------------------- study depth
 def expand_hits(index, hits):
     """Give every hit the chunk before and after it (same file), so a passage is not cut in the middle."""
+    if getattr(index, "memory", None):
+        return index.memory.expand_hits(hits)
     chunks = index.chunks
     pos = getattr(index, "_depth_pos", None)
     if pos is None or getattr(index, "_depth_pos_for", None) is not chunks:
@@ -183,9 +185,9 @@ definitions, steps, and where it is (page, heading) if visible. Quote exact figu
 invent anything. If nothing in this section is relevant, reply with exactly: NONE"""
 
 
-def rank_files(index, question, count):
+def rank_files(index, question, count, excluded=()):
     """The `count` most relevant files for a question: [(key, path, name)]."""
-    hits = index.search(question, 60)
+    hits = index.search(question, 60, excluded)
     score = {}
     for h in hits:
         score[h["key"]] = score.get(h["key"], 0.0) + h["score"]

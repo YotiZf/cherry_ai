@@ -1,7 +1,7 @@
 """Cerry response deadline: if a cloud model gives no answer within X seconds, Cerry moves on to the next model.
 
 Switch on:  add "cerry_deadline" to ai_workspace_data/plugins.json
-Use:        a strip above the input box:  [x] Switch to the next model if there is no answer within [30] seconds
+Use:        a strip above the input box:  [x] Switch model on timeout [30] seconds
             Or type   /wait 45   (seconds, 5-300)   /wait off   /wait on   /wait local on|off
 Settings:   ai_workspace_data/deadline.json   (created on first start)
 
@@ -264,13 +264,12 @@ def install(ns):
             except ValueError:
                 info.set(f"Seconds must be between {MIN_S:g} and {MAX_S:g}; keeping {settings['seconds']:g}.")
             save()
-        bar = ttk.Frame(app, padding=(6, 0))
-        bar.pack(fill="x", before=app.inp.master)
-        ttk.Checkbutton(bar, text="Switch to the next model if there is no answer within", variable=on,
+        bar = app.sidebar.tool_row("Response settings")
+        ttk.Checkbutton(bar, text="Switch model on timeout", variable=on,
                         command=apply).pack(side="left")
+        ttk.Label(bar, text="Response timeout (seconds)").pack(side="left")
         ttk.Spinbox(bar, from_=MIN_S, to=MAX_S, increment=5, width=5, textvariable=secs, command=apply
                     ).pack(side="left", padx=4)
-        ttk.Label(bar, text="seconds").pack(side="left")
         ttk.Checkbutton(bar, text="also for local models", variable=loc, command=apply).pack(side="left", padx=12)
         ttk.Label(bar, textvariable=info, style="Muted.TLabel").pack(side="left", padx=8)
         secs.trace_add("write", apply)
