@@ -1,5 +1,7 @@
 # cherry_ai (Beta)
 
+This project was built with help from ChatGPT Codex.
+
 Cherry is a Windows desktop AI workspace. You can ask questions about your documents, talk through a shared screen, draft a cover letter for a saved job, or review code changes before applying them. For chat, choose a cloud provider or a local model served by Ollama.
 
 Select a model beside Send at the bottom right of the message box. In the left sidebar, **Token control** and its **Output limit** appear below chat navigation when the token plugin is enabled. Open **Response settings** for Writing style. Click any tool section heading to expand or fold it.
